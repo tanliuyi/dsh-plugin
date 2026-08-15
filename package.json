@@ -1,0 +1,19 @@
+{
+  "name": "dsh-plugins",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DeepSeek Harness 插件集仓库：一个插件一个包，pnpm workspace 管理",
+  "type": "module",
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm -r --if-present test",
+    "docs:sync": "node scripts/sync-docs.mjs",
+    "docs:check": "node scripts/sync-docs.mjs --check",
+    "docs:upstream": "node scripts/sync-upstream.mjs",
+    "docs:upstream:check": "node scripts/sync-upstream.mjs --check"
+  }
+}

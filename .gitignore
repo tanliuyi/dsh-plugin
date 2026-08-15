@@ -1,0 +1,12 @@
+# dependencies
+node_modules/
+
+# build output
+lib/
+dist/
+*.tsbuildinfo
+
+# logs & local state
+*.log
+.DS_Store
+*.tgz

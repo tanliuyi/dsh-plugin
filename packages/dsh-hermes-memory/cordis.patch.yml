@@ -1,0 +1,5 @@
+# 本包贡献的配置层：把 dsh-hermes-memory 插件插入到组合中。
+# 插件行按包名引用（Node 解析会找到 profile 里安装的代码）。
+- insert:
+    - id: dsh-hermes-memory
+      name: '@dsh-plugins/dsh-hermes-memory'

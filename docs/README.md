@@ -6,6 +6,8 @@
 | --- | --- | --- |
 | [`development/`](development/index.md) | **插件开发文档**：从零编写一个 dsh 插件（工具、配置、服务、事件、打包发布、测试） | 人工维护，约定变更时更新 |
 | [`spec/`](spec/index.md) | **插件规范文档**：本仓库的包结构、命名、代码、文档与发布规范（机器可检查部分由脚本校验） | 人工维护，约定变更时更新 |
+| [`development/session-injection.md`](development/session-injection.md) | **会话注入上下文机制研究**：inject/steer/followup、Inbox、surface、runtime context 快照、fork seed 的完整数据流与运行时实测 | 人工维护 |
+| [`development/known-issues.md`](development/known-issues.md) | **已知问题记录**：插件侧已修复缺陷 + 根因在 dsh 核心的上游缺陷（含复现证据与修复建议） | 人工维护，发现缺陷时更新 |
 | [`plugins/INDEX.md`](plugins/INDEX.md) | **插件清单**：当前所有插件包的一览表与符合性检查报告 | **自动生成，禁止手改** |
 
 ## 文档同步机制

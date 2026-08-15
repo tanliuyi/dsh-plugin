@@ -104,12 +104,17 @@ function sessionStore(deps: SubagentsDeps, exec: ExecContext, state: SessionStat
 }
 
 /** 后台执行（ctx.jobs 注册任务）。 */
-async function runInBackground(
+/**
+ * 后台执行（ctx.jobs 注册任务）。
+ * @internal 仅导出供单元测试（tests/background.test.ts）：验证 work 收到
+ * 独立于调用方的信号。插件公共 API 不含本函数，勿在包外使用。
+ */
+export async function runInBackground(
   deps: SubagentsDeps,
   exec: ExecContext,
   state: SessionState,
   label: string,
-  work: () => Promise<void>,
+  work: (signal: AbortSignal) => Promise<void>,
 ): Promise<{ jobId?: string; error?: string }> {
   const jobs = deps.ctx.get('jobs')
   if (!jobs) return { error: 'background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs' }
@@ -128,7 +133,7 @@ async function runInBackground(
         cancel: (reason) => controller.abort(reason ?? 'background subagents run killed'),
         done: (async () => {
           try {
-            await work()
+            await work(controller.signal)
             return { status: 'completed', detail: 'subagents background run finished' }
           } catch (error) {
             return { status: 'failed', detail: String(error) }
@@ -162,12 +167,19 @@ async function runInBackground(
   }
 }
 
-/** 后台完成通知文本（run 记录 + job 快照）。 */
-function backgroundCompletionText(state: SessionState, sessionId: string, jobId: string, snapshot: { status: string; detail?: string }): string | undefined {
+/**
+ * 后台完成通知文本（run 记录 + job 快照）。
+ * @internal 仅导出供单元测试（tests/background.test.ts）。插件公共 API 不含本函数。
+ */
+export function backgroundCompletionText(state: SessionState, sessionId: string, jobId: string, snapshot: { status: string; detail?: string }): string | undefined {
   if (snapshot.status === 'running') return undefined
   const run = state.stores.get(sessionId)?.list().find((record) => record.jobId === jobId)
   const agent = run?.agent ?? 'subagent'
-  const lines = [`[subagents] background run ${run?.id ?? jobId} (${agent}) ${snapshot.status}`]
+  // 通知状态以 run 记录为准：job 的 status 只反映"后台任务未抛错"，
+  // run.state 才是真实终态（后台 launch/execute 捕获错误后 finishRun('failed')
+  // 而 job 仍为 completed，此前导致失败 run 误报 completed）。
+  const status = run?.state ?? snapshot.status
+  const lines = [`[subagents] background run ${run?.id ?? jobId} (${agent}) ${status}`]
   const output = run?.children.at(-1)?.output
   if (output) lines.push(`Output tail:\n${output.slice(-600)}`)
   lines.push('Inspect with `subagents({ action: "status" })`, read the full result with `job_output`, or stop with `subagents({ action: "stop", id })`.')
@@ -269,7 +281,7 @@ export async function launchSingle(deps: SubagentsDeps, state: SessionState, exe
   // 后台 run 才允许 supervisor 等待（前台工具调用阻塞父回合，等待会死锁）
   const asyncFlag = params.async ?? false
 
-  const launch = async (): Promise<void> => {
+  const launch = async (signal: AbortSignal): Promise<void> => {
     try {
       const child = await spawnChild(spawnDeps, {
         agent: agentConfig,
@@ -281,7 +293,7 @@ export async function launchSingle(deps: SubagentsDeps, state: SessionState, exe
         run,
         missionId: run.missionId,
         cwd: exec.cwd,
-        signal: exec.signal,
+        signal,
         supervisorWait: asyncFlag,
       })
       store.finishRun(run.id, child.child.status === 'completed' ? 'completed' : child.child.status === 'stopped' ? 'stopped' : 'failed', {
@@ -297,7 +309,12 @@ export async function launchSingle(deps: SubagentsDeps, state: SessionState, exe
   }
 
   if (asyncFlag) {
-    const started = await runInBackground(deps, exec, state, `subagents ${agentConfig.name}`, launch)
+    // 后台 run 不能复用工具调用方的 exec.signal：工具调用返回后该信号会被
+    // 中止，导致 run 在启动瞬间即被取消（历史缺陷）。改用 runInBackground
+    // 内部独立 controller 的信号，仅由 job cancel / 运行超时驱动中止。
+    const started = await runInBackground(deps, exec, state, `subagents ${agentConfig.name}`, async (signal) => {
+      await launch(signal)
+    })
     if (started.error) return { text: started.error, details: { kind: 'error', results: [] } }
     if (started.jobId) run.jobId = started.jobId
     return {
@@ -307,7 +324,7 @@ export async function launchSingle(deps: SubagentsDeps, state: SessionState, exe
     }
   }
 
-  await launch()
+  await launch(exec.signal)
   const details = store.detailsOf(run)
   const childOutput = run.results
     .map((result) => (result.output?.trim() ? `\n\n${result.output.trim()}` : ''))
@@ -345,7 +362,12 @@ export async function launchWorkflow(deps: SubagentsDeps, state: SessionState, e
   const asyncFlag = params.async ?? deps.config.asyncByDefault
 
   let nextIndex = 0
-  const onSpawn = async (key: string, item: WorkflowItem): Promise<RunsApiResult> => {
+  // onSpawn 工厂：每次执行（execute）创建独立闭包，显式捕获本次执行的信号——
+  // 前台为 exec.signal，后台为独立 controller 信号。spawnChild 必须与 workflow
+  // 执行共用同一信号，否则后台 workflow 的 lane 会收到已中止的调用方信号
+  // （工具调用返回后 exec.signal 即 abort），lane 启动即被取消。工厂形式避免
+  // 跨执行共享可变状态（并发 execute 各自持有自己的信号闭包）。
+  const makeOnSpawn = (signal: AbortSignal) => async (key: string, item: WorkflowItem): Promise<RunsApiResult> => {
     const agentConfig = await resolveWorkflowAgent(deps, registry, item.agent, projectRoot)
     if (!agentConfig) throw new Error(`workflow step "${key}" names unknown agent "${item.agent}"`)
     const index = nextIndex++
@@ -367,7 +389,7 @@ export async function launchWorkflow(deps: SubagentsDeps, state: SessionState, e
       run,
       missionId: run.missionId,
       cwd: exec.cwd,
-      signal: exec.signal,
+      signal,
       supervisorWait: asyncFlag,
     })
     if (run.missionId) {
@@ -384,6 +406,8 @@ export async function launchWorkflow(deps: SubagentsDeps, state: SessionState, e
   }
 
   const execute = async (signal: AbortSignal): Promise<{ value: unknown; text: string }> => {
+    // lane 子代理与 workflow 脚本共用同一执行信号（闭包显式捕获本次 execute 的信号）
+    const onSpawn = makeOnSpawn(signal)
     // 运行级超时：vm 沙箱只约束同步段，异步挂起由该信号竞速中止
     const controller = new AbortController()
     const timeoutMs = params.timeoutMs ?? params.maxRuntimeMs ?? deps.config.timeoutMs ?? DEFAULT_FOREGROUND_TIMEOUT_MS
@@ -417,8 +441,8 @@ export async function launchWorkflow(deps: SubagentsDeps, state: SessionState, e
   }
 
   if (asyncFlag) {
-    const started = await runInBackground(deps, exec, state, `subagents workflow (${run.workflowGraph ?? script.slice(0, 60)})`, async () => {
-      await execute(exec.signal)
+    const started = await runInBackground(deps, exec, state, `subagents workflow (${run.workflowGraph ?? script.slice(0, 60)})`, async (signal) => {
+      await execute(signal)
     })
     if (started.error) return { text: started.error, details: { kind: 'error', results: [] } }
     if (started.jobId) run.jobId = started.jobId

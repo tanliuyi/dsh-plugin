@@ -9,7 +9,7 @@
  *     factory: (require) => { <CJS bundle>; return module.exports }
  *   })
  *
- * react / react/jsx-runtime 是平台种子（外壳预置），作为 external；
+ * react / react/jsx-runtime 与 DSH UI primitives 是平台静态模块，作为 external；
  * 其余依赖（如有）全部内联。type-only 导入（cordis 类型等）在打包时被擦除，
  * 不会进入 bundle。
  */
@@ -32,7 +32,7 @@ const result = await build({
   target: 'es2022',
   write: false,
   logLevel: 'info',
-  external: ['react', 'react/jsx-runtime'],
+  external: ['react', 'react/jsx-runtime', '@deepseek-ai/dsh-client-ui-primitives'],
 })
 
 // esbuild 出错时通常以 rejection 抛出，但显式检查更稳：绝不带着失败

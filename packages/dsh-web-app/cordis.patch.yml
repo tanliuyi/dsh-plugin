@@ -1,0 +1,84 @@
+# @dsh-plugins/dsh-web-app bundle patch：完全独立的 dsh Web UI。
+#
+# 组合 = dsh-base（host 核心）+ 本层（自建 web 传输 + 自研前端）。
+# 不加载 @deepseek-ai/dsh-web-app：无 __DSH_BOOT__、无 client-modules、
+# 无 ui-* 插件阵容。前端是独立 SPA，直连公开的 /api 传输协议
+# （POST /api/<method> 一元 RPC + /api/events.mux、/api/events.host
+# WebSocket downlink）。
+#
+# 端口默认 3090，与官方 web profile 的 3080 隔离。
+
+# 覆盖 base 的默认 persona（headless/web-app 同款）。
+- id: system-prompt
+  config:
+    persona: >-
+      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+
+# 官方 HMR 链依赖 client-modules 机制，独立前端不适用。
+- id: hmr
+  disabled: true
+
+- id: tools
+  config:
+    mode: !!js process.env.DSH_TOOLS_MODE
+
+- insert:
+    # 自建启动 provider：解析 --host/--port/--trusted-host → webStartup。
+    - id: web-startup
+      name: '@dsh-plugins/dsh-web-app/startup'
+
+    # HTTP 服务。默认 127.0.0.1:3090（与 web 的 3080 隔离）。
+    - id: webserver
+      name: '@deepseek-ai/dsh-host-webserver'
+      inject: [webStartup]
+      config:
+        host: !!js ctx.webStartup.host ?? '127.0.0.1'
+        port: !!js ctx.webStartup.port ?? 3090
+
+    # transport-agnostic /api 网关（业务服务 @Remote 方法的调度面）。
+    - id: api-gateway
+      name: '@deepseek-ai/dsh-host-apiproxy'
+
+    # /api 前缀路由（信任围栏）+ events.mux / events.host WebSocket downlink。
+    - id: connection
+      name: '@deepseek-ai/dsh-client-connection'
+      inject: [webStartup]
+      config:
+        trustedHosts: !!js ctx.webStartup.trustedHosts
+
+    # 自建 web runtime：SPA 静态服务（fallback seat）+ URL 打印。
+    - id: web-runtime
+      name: '@dsh-plugins/dsh-web-app'
+      inject: [webServer, webStartup]
+      config:
+        printUrl: true
+
+    # host 侧支撑行（官方 web-app 同样 insert 的独立包）。
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+
+    - id: storage-json
+      name: '@deepseek-ai/dsh-storage-json'
+      config:
+        root: !!js dshHomePath('storages')
+
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: json
+
+    # apiproxy 依赖 directoryPicker；workspace 与 projection-cache 依赖 storageDomain。
+    - id: directory-picker
+      name: '@deepseek-ai/dsh-host-directory-picker-auto'
+
+    - id: code-runtime
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
+
+    - id: session-projection-cache
+      name: '@deepseek-ai/dsh-session-projection-cache'
+      config:
+        writeEveryEvents: 200
+        writeIntervalMs: 5000

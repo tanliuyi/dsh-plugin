@@ -1,0 +1,4 @@
+# Persistent web-only visual layer for the DSH shell.
+- insert:
+    - id: claude-visual-theme
+      name: '@dsh-plugins/claude-visual-theme'

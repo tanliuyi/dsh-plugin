@@ -1,0 +1,31 @@
+{
+  "name": "@dsh-plugins/claude-visual-theme",
+  "version": "0.1.0",
+  "description": "Claude visual tokens and typography for the DSH web shell",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "build.mjs",
+    "lib",
+    "fonts",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "license": "MIT"
+}

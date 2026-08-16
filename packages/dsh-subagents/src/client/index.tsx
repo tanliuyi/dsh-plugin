@@ -9,9 +9,10 @@
  * 发送，宿主计算与 baseline 的差异后落盘并 live-apply。
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { SettingsSectionOwnerProps } from '@deepseek-ai/dsh-client-ui-settings/client'
+import { Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { WebSettingsValue } from '../web-settings.ts'
 
 /** 客户端注入的服务：只需要 slots（settings 契约经 slots.inject 等待声明）。 */
@@ -25,23 +26,58 @@ if (typeof document !== 'undefined' && document.getElementById(STYLE_ID) === nul
   const style = document.createElement('style')
   style.id = STYLE_ID
   style.textContent = `
-.dshsub-section{display:flex;flex-direction:column;gap:12px;max-width:560px}
-.dshsub-intro{color:var(--dsw-alias-label-secondary, #667);font-size:12px;line-height:18px;margin:0}
-.dshsub-intro code{color:var(--dsw-alias-label-primary, #333)}
-.dshsub-status,.dshsub-notice{color:var(--dsw-alias-label-secondary, #667);font-size:12px;margin:0}
-.dshsub-error{color:var(--dsw-alias-status-danger, #c33);font-size:12px;margin:0}
-.dshsub-form{display:flex;flex-direction:column;gap:10px}
-.dshsub-row{display:flex;flex-direction:column;gap:4px;border-bottom:1px solid var(--dsw-alias-border-l2, #eee);padding:8px 0}
-.dshsub-row-label{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-primary, #333);font-size:13px}
-.dshsub-restart{color:var(--dsw-alias-status-warning, #b60);font-size:11px;font-style:normal;border:1px solid var(--dsw-alias-border-l2, #ddd);border-radius:4px;padding:0 4px}
-.dshsub-control{background:var(--dsw-alias-surface-l2, #fff);color:var(--dsw-alias-label-primary, #333);border:1px solid var(--dsw-alias-border-l2, #ccc);border-radius:6px;padding:4px 8px;font-size:13px;max-width:360px}
-.dshsub-number{max-width:160px}
-.dshsub-inline{display:flex;gap:8px;align-items:center}
-.dshsub-actions{display:flex;gap:8px;align-items:center}
-.dshsub-button{background:var(--dsw-alias-surface-l2, #fff);color:var(--dsw-alias-label-primary, #333);border:1px solid var(--dsw-alias-border-l2, #ccc);border-radius:6px;padding:5px 14px;font-size:13px;cursor:pointer}
-.dshsub-button:disabled{opacity:.5;cursor:default}
-.dshsub-primary{background:var(--dsw-alias-accent, #2563eb);border-color:transparent;color:#fff}
-.dshsub-dirty{color:var(--dsw-alias-status-warning, #b60);font-size:12px}
+.dshsub-section{box-sizing:border-box;display:flex;flex-direction:column;gap:24px;width:100%;max-width:720px;padding:4px 0 24px;color:var(--dsw-alias-label-primary, #0f1115);font-size:14px;line-height:22px}
+.dshsub-header{display:flex;flex-direction:column;gap:6px}
+.dshsub-kicker{margin:0;color:var(--dsw-alias-label-tertiary, #81858c);font-size:12px;line-height:18px;font-weight:500;letter-spacing:.04em;text-transform:uppercase}
+.dshsub-title{margin:0;color:var(--dsw-alias-label-primary, #0f1115);font-size:20px;line-height:28px;font-weight:500}
+.dshsub-intro{max-width:620px;margin:0;color:var(--dsw-alias-label-secondary, #61666b);font-size:14px;line-height:22px}
+.dshsub-intro code{padding:2px 5px;border-radius:5px;background:var(--dsw-alias-bg-module-platform, #f1f3f5);color:var(--dsw-alias-label-primary, #0f1115);font:12px/18px var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace)}
+.dshsub-summary{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+.dshsub-summary-item{display:inline-flex;align-items:center;gap:6px;min-height:24px;padding:0 8px;border-radius:12px;background:var(--dsw-alias-bg-layer-2, #fff);color:var(--dsw-alias-label-secondary, #61666b);font-size:12px;line-height:18px}
+.dshsub-summary-item[data-state=dirty]{color:var(--dsw-alias-state-warn-label, #dd8629);background:var(--dsw-alias-state-warn-tertiary, #fef5e7)}
+.dshsub-summary-item[data-state=clean]{color:var(--dsw-alias-state-success-primary, #22c55e);background:var(--dsw-alias-state-success-tertiary, #e6faed)}
+.dshsub-summary-dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.dshsub-status,.dshsub-notice{margin:0;color:var(--dsw-alias-label-secondary, #61666b);font-size:14px;line-height:22px}
+.dshsub-error{margin:0;padding:10px 12px;border-radius:8px;background:var(--dsw-alias-state-error-tertiary, #fef2f2);color:var(--dsw-alias-state-error-primary, #ec1313);font-size:14px;line-height:22px}
+.dshsub-form{display:flex;flex-direction:column;gap:24px}
+.dshsub-group{display:flex;flex-direction:column;min-width:0;border-top:1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.04))}
+.dshsub-group-heading{display:flex;flex-direction:column;gap:2px;padding:16px 0 8px}
+.dshsub-group-title{margin:0;color:var(--dsw-alias-label-primary, #0f1115);font-size:16px;line-height:24px;font-weight:500}
+.dshsub-group-description{margin:0;color:var(--dsw-alias-label-tertiary, #81858c);font-size:12px;line-height:18px}
+.dshsub-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(180px,260px);align-items:center;gap:24px;min-height:56px;padding:10px 0;border-bottom:1px solid var(--dsw-alias-border-l1, rgba(0,0,0,.04))}
+.dshsub-row-label{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-width:0;color:var(--dsw-alias-label-primary, #0f1115);font-size:14px;line-height:22px}
+.dshsub-row-description{color:var(--dsw-alias-label-tertiary, #81858c);font-size:12px;line-height:18px}
+.dshsub-restart{display:inline-flex;align-items:center;min-height:20px;padding:0 6px;border-radius:10px;background:var(--dsw-alias-state-warn-tertiary, #fef5e7);color:var(--dsw-alias-state-warn-label, #dd8629);font-size:11px;line-height:16px;font-style:normal;font-weight:500}
+.dshsub-control{box-sizing:border-box;width:100%;min-width:0;height:32px;padding:4px 8px;border:1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1));border-radius:8px;background:var(--dsw-alias-bg-layer-1, #fff);color:var(--dsw-alias-label-primary, #0f1115);font-size:14px;line-height:22px;font-family:inherit;outline:none;transition:border-color .15s ease,background .15s ease}
+.dshsub-select{position:relative;width:100%;min-width:0}
+.dshsub-select-trigger{display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:left;cursor:pointer}
+.dshsub-select-trigger[data-open=true]{border-color:var(--dsw-alias-state-business-primary, #4176e6);background:var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.04))}
+.dshsub-select-value{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshsub-select-chevron{flex:0 0 7px;width:7px;height:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg) translateY(-2px);transition:transform .15s ease}
+.dshsub-select-trigger[data-open=true] .dshsub-select-chevron{transform:rotate(225deg) translate(-1px,-1px)}
+.dshsub-select-menu{position:absolute;z-index:20;top:calc(100% + 4px);left:0;width:100%;box-sizing:border-box;margin:0;padding:4px;border:1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.1));border-radius:8px;background:var(--dsw-alias-bg-layer-2, #fff);box-shadow:0 8px 24px rgba(15,17,21,.12);list-style:none}
+.dshsub-select-option{display:flex;align-items:center;min-height:32px;padding:0 8px;border-radius:6px;color:var(--dsw-alias-label-primary, #0f1115);font-size:14px;line-height:22px;cursor:pointer}
+.dshsub-select-option:hover,.dshsub-select-option[data-active=true]{background:var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.04))}
+.dshsub-select-option[data-selected=true]{color:var(--dsw-alias-state-business-primary, #4176e6);font-weight:500}
+.dshsub-select-option:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary, #4176e6);outline-offset:-2px}
+.dshsub-select-option-mark{width:14px;margin-right:2px;color:currentColor;font-size:12px}
+.dshsub-select-option-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshsub-control:hover{background:var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.04))}
+.dshsub-control:focus{border-color:var(--dsw-alias-state-business-primary, #4176e6)}
+.dshsub-control::placeholder{color:var(--dsw-alias-label-dimmed, #cfd3d8)}
+.dshsub-input{display:block;width:100%;min-width:0}
+.dshsub-number{max-width:none}
+.dshsub-inline{display:flex;gap:8px;align-items:center;min-width:0}
+.dshsub-inline .dshsub-select{flex:0 0 128px}
+.dshsub-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding-top:8px}
+.dshsub-button{display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 14px;border:1px solid transparent;border-radius:18px;background:transparent;color:var(--dsw-alias-label-primary, #0f1115);font-size:14px;line-height:22px;font-family:inherit;cursor:pointer;transition:background .15s ease,opacity .15s ease}
+.dshsub-button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover, rgba(0,0,0,.04))}
+.dshsub-button:focus-visible,.dshsub-control:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary, #4176e6);outline-offset:2px}
+.dshsub-button:disabled{opacity:.4;cursor:not-allowed}
+.dshsub-primary{background:var(--dsw-alias-button-primary-fill, #0f1115);color:var(--dsw-alias-label-primary-foreground, #fff)}
+.dshsub-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover, #333438)}
+.dshsub-dirty{margin-left:4px;color:var(--dsw-alias-state-warn-label, #dd8629);font-size:12px;line-height:18px}
+@media (max-width:640px){.dshsub-section{gap:20px}.dshsub-row{grid-template-columns:1fr;gap:8px;align-items:stretch}.dshsub-inline .dshsub-control:first-child{flex-basis:120px}.dshsub-actions{padding-top:4px}}
 `
   document.head.appendChild(style)
 }
@@ -131,46 +167,149 @@ function isClean(draft: Draft, effective: WebSettingsValue): boolean {
   return true
 }
 
-const FIELD_LABELS: Record<keyof WebSettingsValue, string> = {
-  asyncByDefault: '默认后台运行（workflowScript）',
-  timeoutMs: '运行超时（分钟）',
-  gateTimeoutMs: 'gate 验证超时（秒）',
-  maxSubagentSpawnsPerRun: '单次运行子代理上限',
-  maxSubagentSpawnsPerSession: '会话累计启动上限（0 = 无限）',
-  maxActiveAsyncRunsPerSession: '并发后台运行上限（0 = 无限）',
-  maxSubagentDepth: '嵌套委派深度上限',
-  defaultModel: '默认子代理模型',
-  defaultThinking: '默认思考级别',
-  missionsEnabled: 'missions 存储',
-  scheduledRunsEnabled: '持久调度',
-  intercomMode: 'intercom 模式',
-  watchdogEnabled: 'watchdog',
-  watchdogMainModel: 'watchdog 模型',
-  watchdogMainThinking: 'watchdog 思考级别',
+interface FieldMeta {
+  label: string
+  description: string
+}
+
+const FIELD_META: Record<keyof WebSettingsValue, FieldMeta> = {
+  asyncByDefault: { label: '默认后台运行', description: 'workflowScript 默认交给后台执行' },
+  timeoutMs: { label: '运行超时', description: '单次子代理运行的最长时间' },
+  gateTimeoutMs: { label: '验证命令超时', description: 'gate 验证命令允许执行的时间' },
+  maxSubagentSpawnsPerRun: { label: '单次运行上限', description: '一棵委派树最多启动的子代理数' },
+  maxSubagentSpawnsPerSession: { label: '会话启动上限', description: '当前会话累计启动数，0 表示无限' },
+  maxActiveAsyncRunsPerSession: { label: '并发运行上限', description: '当前会话同时运行的后台任务数，0 表示无限' },
+  maxSubagentDepth: { label: '嵌套委派深度', description: '子代理继续委派时允许的最大层级' },
+  defaultModel: { label: '默认子代理模型', description: '未指定模型时使用的模型 ID' },
+  defaultThinking: { label: '默认思考级别', description: '未指定时应用到子代理的 thinking 配置' },
+  missionsEnabled: { label: 'Missions 存储', description: '保存工作流任务的状态与结果' },
+  scheduledRunsEnabled: { label: '持久调度', description: '启用定时工作流和持久化调度' },
+  intercomMode: { label: 'Intercom 通道', description: '控制子代理与父会话之间的回报通道' },
+  watchdogEnabled: { label: 'Watchdog 评审', description: '在回合边界检查代码变更与范围漂移' },
+  watchdogMainModel: { label: 'Watchdog 模型', description: '执行对抗性评审的主模型 ID' },
+  watchdogMainThinking: { label: 'Watchdog 思考级别', description: 'Watchdog 主模型的 thinking 配置' },
 }
 
 /** 需要重启的键（与宿主 RESTART_REQUIRED_KEYS 一致；GET 响应也会带回）。 */
 const RESTART_KEYS = new Set(['missionsEnabled', 'scheduledRunsEnabled'])
 
-function Field({ label, restart, children }: { label: string; restart?: boolean; children: ReactNode }) {
+function Field({ meta, restart, children }: { meta: FieldMeta; restart?: boolean; children: ReactNode }) {
+  const labelId = useId()
   return (
-    <label className="dshsub-row">
-      <span className="dshsub-row-label">
-        {label}
+    <div className="dshsub-row" role="group" aria-labelledby={labelId}>
+      <span className="dshsub-row-label" id={labelId}>
+        <span>{meta.label}</span>
+        <span className="dshsub-row-description">{meta.description}</span>
         {restart ? <em className="dshsub-restart">重启后生效</em> : null}
       </span>
       {children}
-    </label>
+    </div>
+  )
+}
+
+interface SelectOption {
+  value: string
+  label: string
+}
+
+function CustomSelect({ value, options, onChange, ariaLabel }: { value: string; options: SelectOption[]; onChange: (value: string) => void; ariaLabel: string }) {
+  const [open, setOpen] = useState(false)
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value))
+  const [activeIndex, setActiveIndex] = useState(selectedIndex)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const listboxId = useId()
+  const selected = options[selectedIndex] ?? options[0]
+
+  useEffect(() => {
+    setActiveIndex(selectedIndex)
+  }, [selectedIndex])
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnOutsidePointer = (event: PointerEvent): void => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    window.addEventListener('pointerdown', closeOnOutsidePointer)
+    return () => window.removeEventListener('pointerdown', closeOnOutsidePointer)
+  }, [open])
+
+  const choose = (index: number): void => {
+    const option = options[index]
+    if (!option) return
+    onChange(option.value)
+    setActiveIndex(index)
+    setOpen(false)
+    buttonRef.current?.focus()
+  }
+
+  const move = (delta: number): void => {
+    setActiveIndex((current) => (current + delta + options.length) % options.length)
+  }
+
+  const onButtonKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>): void => {
+    if (event.key === 'Escape') {
+      setOpen(false)
+      return
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+      event.preventDefault()
+      if (!open) setOpen(true)
+      move(1)
+    } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+      event.preventDefault()
+      if (!open) setOpen(true)
+      move(-1)
+    } else if (event.key === 'Home') {
+      event.preventDefault()
+      setActiveIndex(0)
+    } else if (event.key === 'End') {
+      event.preventDefault()
+      setActiveIndex(options.length - 1)
+    } else if ((event.key === 'Enter' || event.key === ' ') && open) {
+      event.preventDefault()
+      choose(activeIndex)
+    }
+  }
+
+  return (
+    <div className="dshsub-select" ref={rootRef}>
+      <button type="button" ref={buttonRef} className="dshsub-control dshsub-select-trigger" data-open={open}
+        aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open} aria-controls={listboxId}
+        onClick={() => setOpen((current) => !current)} onKeyDown={onButtonKeyDown}>
+        <span className="dshsub-select-value">{selected?.label ?? ''}</span>
+        <span className="dshsub-select-chevron" aria-hidden="true" />
+      </button>
+      {open ? (
+        <ul className="dshsub-select-menu" id={listboxId} role="listbox" aria-label={ariaLabel}>
+          {options.map((option, index) => (
+            <li key={option.value} className="dshsub-select-option" role="option" tabIndex={-1}
+              data-active={index === activeIndex} data-selected={option.value === value}
+              aria-selected={option.value === value} onMouseEnter={() => setActiveIndex(index)} onClick={() => choose(index)}>
+              <span className="dshsub-select-option-mark" aria-hidden="true">{option.value === value ? '✓' : ''}</span>
+              <span className="dshsub-select-option-label">{option.label}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   )
 }
 
 function BooleanSelect({ draft, setDraft, field }: { draft: Draft; setDraft: (d: Draft) => void; field: string }) {
+  return <CustomSelect ariaLabel={field} value={draft[field] ?? ''} onChange={(value) => setDraft({ ...draft, [field]: value })}
+    options={[{ value: '', label: '继承默认' }, { value: 'true', label: '开' }, { value: 'false', label: '关' }]} />
+}
+
+function NumberInput({ draft, setDraft, field, placeholder, step = 1 }: { draft: Draft; setDraft: (d: Draft) => void; field: string; placeholder: string; step?: number }) {
   return (
-    <select className="dshsub-control" value={draft[field] ?? ''} onChange={(e) => setDraft({ ...draft, [field]: e.target.value })}>
-      <option value="">继承默认</option>
-      <option value="true">开</option>
-      <option value="false">关</option>
-    </select>
+    <Input className="dshsub-input dshsub-number" type="number" min={0} step={step}
+      aria-label={field} value={draft[field] ?? ''}
+      onChange={(e) => {
+        const value = e.target.value
+        if (value === '' || (Number.isFinite(Number(value)) && Number(value) >= 0)) setDraft({ ...draft, [field]: value })
+      }}
+      placeholder={placeholder} />
   )
 }
 
@@ -179,15 +318,9 @@ function ThinkingSelect({ draft, setDraft, field }: { draft: Draft; setDraft: (d
   const custom = value !== '' && value !== 'off'
   return (
     <span className="dshsub-inline">
-      <select className="dshsub-control" value={custom ? 'custom' : value} onChange={(e) => {
-        const next = e.target.value
-        setDraft({ ...draft, [field]: next === 'custom' ? 'high' : next })
-      }}>
-        <option value="">继承默认</option>
-        <option value="off">关闭</option>
-        <option value="custom">自定义…</option>
-      </select>
-      {custom ? <input className="dshsub-control" value={value} onChange={(e) => setDraft({ ...draft, [field]: e.target.value })} placeholder="如 high / low" /> : null}
+      <CustomSelect ariaLabel={field} value={custom ? 'custom' : value} onChange={(next) => setDraft({ ...draft, [field]: next === 'custom' ? 'high' : next })}
+        options={[{ value: '', label: '继承默认' }, { value: 'off', label: '关闭' }, { value: 'custom', label: '自定义…' }]} />
+      {custom ? <Input className="dshsub-input" aria-label={field + ' 自定义值'} value={value} onChange={(e) => setDraft({ ...draft, [field]: e.target.value })} placeholder="如 high / low" /> : null}
     </span>
   )
 }
@@ -272,109 +405,124 @@ async function parseJsonResponse(res: Response): Promise<unknown> {
 
   const restartKeys = new Set(view?.restartKeys ?? [...RESTART_KEYS])
   const dirty = view !== null && !isClean(draft, view.effective)
+  const overrideCount = view === null ? 0 : Object.keys(view.overrides).length
 
   return (
     <div className="dshsub-section">
-      <p className="dshsub-intro">
-        子代理委派（subagents 工具）的运行时偏好。改动即时生效（消费点在调用时读取配置）；
-        标「重启后生效」的键需要重启 dsh 或热重载插件。覆盖写入{' '}
-        <code>~/.dsh/subagents/web-settings.json</code>。
-      </p>
+      <header className="dshsub-header">
+        <h2 className="dshsub-title">子代理设置</h2>
+        <p className="dshsub-intro">管理委派运行时的默认行为、资源边界和质量守护。留空的字段会继承当前 profile 默认值。</p>
+        {view !== null ? (
+          <div className="dshsub-summary" aria-live="polite">
+            <span className="dshsub-summary-item" data-state={dirty ? 'dirty' : 'clean'}>
+              <span className="dshsub-summary-dot" aria-hidden="true" />
+              {dirty ? '有未保存修改' : '设置已同步'}
+            </span>
+            <span className="dshsub-summary-item">{overrideCount > 0 ? `${overrideCount} 项自定义覆盖` : '使用默认配置'}</span>
+            <span className="dshsub-summary-item">空值 = 继承默认</span>
+          </div>
+        ) : null}
+      </header>
       {view === null && error === null ? <p className="dshsub-status">加载中…</p> : null}
-      {error !== null ? <p className="dshsub-error">{error}</p> : null}
+      {error !== null ? <p className="dshsub-error" role="alert">{error}</p> : null}
       {view !== null ? (
         <div className="dshsub-form">
-          <Field label={FIELD_LABELS['asyncByDefault']}>
-            <BooleanSelect draft={draft} setDraft={setDraft} field="asyncByDefault" />
-          </Field>
-          <Field label={FIELD_LABELS['timeoutMs']}>
-            <input className="dshsub-control dshsub-number" type="number" min={0} step={1}
-              value={draft['timeoutMs'] ?? ''}
-              onChange={(e) => {
-                const v = e.target.value
-                if (v === '' || (Number.isFinite(Number(v)) && Number(v) >= 0)) setDraft({ ...draft, timeoutMs: v })
-              }}
-              placeholder="继承（分钟）" />
-          </Field>
-          <Field label={FIELD_LABELS['gateTimeoutMs']}>
-            <input className="dshsub-control dshsub-number" type="number" min={0} step={1}
-              value={draft['gateTimeoutMs'] ?? ''}
-              onChange={(e) => {
-                const v = e.target.value
-                if (v === '' || (Number.isFinite(Number(v)) && Number(v) >= 0)) setDraft({ ...draft, gateTimeoutMs: v })
-              }}
-              placeholder="继承（秒）" />
-          </Field>
-          <Field label={FIELD_LABELS['maxSubagentSpawnsPerRun']}>
-            <input className="dshsub-control dshsub-number" type="number" min={0} step={1}
-              value={draft['maxSubagentSpawnsPerRun'] ?? ''}
-              onChange={(e) => setDraft({ ...draft, maxSubagentSpawnsPerRun: e.target.value })}
-              placeholder="继承" />
-          </Field>
-          <Field label={FIELD_LABELS['maxSubagentSpawnsPerSession']}>
-            <input className="dshsub-control dshsub-number" type="number" min={0} step={1}
-              value={draft['maxSubagentSpawnsPerSession'] ?? ''}
-              onChange={(e) => setDraft({ ...draft, maxSubagentSpawnsPerSession: e.target.value })}
-              placeholder="继承" />
-          </Field>
-          <Field label={FIELD_LABELS['maxActiveAsyncRunsPerSession']}>
-            <input className="dshsub-control dshsub-number" type="number" min={0} step={1}
-              value={draft['maxActiveAsyncRunsPerSession'] ?? ''}
-              onChange={(e) => setDraft({ ...draft, maxActiveAsyncRunsPerSession: e.target.value })}
-              placeholder="继承" />
-          </Field>
-          <Field label={FIELD_LABELS['maxSubagentDepth']}>
-            <input className="dshsub-control dshsub-number" type="number" min={0} step={1}
-              value={draft['maxSubagentDepth'] ?? ''}
-              onChange={(e) => setDraft({ ...draft, maxSubagentDepth: e.target.value })}
-              placeholder="继承" />
-          </Field>
-          <Field label={FIELD_LABELS['defaultModel']}>
-            <input className="dshsub-control" type="text"
-              value={draft['defaultModel'] ?? ''}
-              onChange={(e) => setDraft({ ...draft, defaultModel: e.target.value })}
-              placeholder="继承（如 anthropic/claude-sonnet-4:high）" />
-          </Field>
-          <Field label={FIELD_LABELS['defaultThinking']}>
-            <ThinkingSelect draft={draft} setDraft={setDraft} field="defaultThinking" />
-          </Field>
-          <Field label={FIELD_LABELS['missionsEnabled']} restart={restartKeys.has('missionsEnabled')}>
-            <BooleanSelect draft={draft} setDraft={setDraft} field="missionsEnabled" />
-          </Field>
-          <Field label={FIELD_LABELS['scheduledRunsEnabled']} restart={restartKeys.has('scheduledRunsEnabled')}>
-            <BooleanSelect draft={draft} setDraft={setDraft} field="scheduledRunsEnabled" />
-          </Field>
-          <Field label={FIELD_LABELS['intercomMode']}>
-            <select className="dshsub-control" value={draft['intercomMode'] ?? ''}
-              onChange={(e) => setDraft({ ...draft, intercomMode: e.target.value })}>
-              <option value="">继承默认</option>
-              <option value="always">always</option>
-              <option value="fork-only">fork-only</option>
-              <option value="off">off</option>
-            </select>
-          </Field>
-          <Field label={FIELD_LABELS['watchdogEnabled']}>
-            <BooleanSelect draft={draft} setDraft={setDraft} field="watchdogEnabled" />
-          </Field>
-          <Field label={FIELD_LABELS['watchdogMainModel']}>
-            <input className="dshsub-control" type="text"
-              value={draft['watchdogMainModel'] ?? ''}
-              onChange={(e) => setDraft({ ...draft, watchdogMainModel: e.target.value })}
-              placeholder="继承（watchdog 开启时使用）" />
-          </Field>
-          <Field label={FIELD_LABELS['watchdogMainThinking']}>
-            <ThinkingSelect draft={draft} setDraft={setDraft} field="watchdogMainThinking" />
-          </Field>
+          <section className="dshsub-group">
+            <div className="dshsub-group-heading">
+              <h3 className="dshsub-group-title">运行策略</h3>
+              <p className="dshsub-group-description">控制任务何时执行，以及验证阶段的时间边界。</p>
+            </div>
+            <Field meta={FIELD_META.asyncByDefault}>
+              <BooleanSelect draft={draft} setDraft={setDraft} field="asyncByDefault" />
+            </Field>
+            <Field meta={FIELD_META.timeoutMs}>
+              <NumberInput draft={draft} setDraft={setDraft} field="timeoutMs" placeholder="继承（分钟）" step={0.1} />
+            </Field>
+            <Field meta={FIELD_META.gateTimeoutMs}>
+              <NumberInput draft={draft} setDraft={setDraft} field="gateTimeoutMs" placeholder="继承（秒）" />
+            </Field>
+          </section>
+
+          <section className="dshsub-group">
+            <div className="dshsub-group-heading">
+              <h3 className="dshsub-group-title">资源边界</h3>
+              <p className="dshsub-group-description">限制委派树和会话级并发，避免后台任务无界增长。</p>
+            </div>
+            <Field meta={FIELD_META.maxSubagentSpawnsPerRun}>
+              <NumberInput draft={draft} setDraft={setDraft} field="maxSubagentSpawnsPerRun" placeholder="继承" />
+            </Field>
+            <Field meta={FIELD_META.maxSubagentSpawnsPerSession}>
+              <NumberInput draft={draft} setDraft={setDraft} field="maxSubagentSpawnsPerSession" placeholder="继承" />
+            </Field>
+            <Field meta={FIELD_META.maxActiveAsyncRunsPerSession}>
+              <NumberInput draft={draft} setDraft={setDraft} field="maxActiveAsyncRunsPerSession" placeholder="继承" />
+            </Field>
+            <Field meta={FIELD_META.maxSubagentDepth}>
+              <NumberInput draft={draft} setDraft={setDraft} field="maxSubagentDepth" placeholder="继承" />
+            </Field>
+          </section>
+
+          <section className="dshsub-group">
+            <div className="dshsub-group-heading">
+              <h3 className="dshsub-group-title">模型策略</h3>
+              <p className="dshsub-group-description">设置未明确指定时的模型与 thinking 行为。</p>
+            </div>
+            <Field meta={FIELD_META.defaultModel}>
+              <Input className="dshsub-input" type="text" aria-label="默认子代理模型" value={draft.defaultModel ?? ''}
+                onChange={(e) => setDraft({ ...draft, defaultModel: e.target.value })}
+                placeholder="继承（如 anthropic/claude-sonnet-4:high）" />
+            </Field>
+            <Field meta={FIELD_META.defaultThinking}>
+              <ThinkingSelect draft={draft} setDraft={setDraft} field="defaultThinking" />
+            </Field>
+          </section>
+
+          <section className="dshsub-group">
+            <div className="dshsub-group-heading">
+              <h3 className="dshsub-group-title">能力与集成</h3>
+              <p className="dshsub-group-description">启用持久能力，并配置子代理与父会话的通信方式。</p>
+            </div>
+            <Field meta={FIELD_META.missionsEnabled} restart={restartKeys.has('missionsEnabled')}>
+              <BooleanSelect draft={draft} setDraft={setDraft} field="missionsEnabled" />
+            </Field>
+            <Field meta={FIELD_META.scheduledRunsEnabled} restart={restartKeys.has('scheduledRunsEnabled')}>
+              <BooleanSelect draft={draft} setDraft={setDraft} field="scheduledRunsEnabled" />
+            </Field>
+            <Field meta={FIELD_META.intercomMode}>
+              <CustomSelect ariaLabel="intercomMode" value={draft.intercomMode ?? ''} onChange={(value) => setDraft({ ...draft, intercomMode: value })}
+                options={[{ value: '', label: '继承默认' }, { value: 'always', label: '始终启用' }, { value: 'fork-only', label: '仅 fork 会话' }, { value: 'off', label: '关闭' }]} />
+            </Field>
+          </section>
+
+          <section className="dshsub-group">
+            <div className="dshsub-group-heading">
+              <h3 className="dshsub-group-title">质量守护</h3>
+              <p className="dshsub-group-description">让 Watchdog 在回合边界对代码变更进行额外检查。</p>
+            </div>
+            <Field meta={FIELD_META.watchdogEnabled}>
+              <BooleanSelect draft={draft} setDraft={setDraft} field="watchdogEnabled" />
+            </Field>
+            <Field meta={FIELD_META.watchdogMainModel}>
+              <Input className="dshsub-input" type="text" aria-label="Watchdog 模型" value={draft.watchdogMainModel ?? ''}
+                onChange={(e) => setDraft({ ...draft, watchdogMainModel: e.target.value })}
+                placeholder="继承（Watchdog 开启时使用）" />
+            </Field>
+            <Field meta={FIELD_META.watchdogMainThinking}>
+              <ThinkingSelect draft={draft} setDraft={setDraft} field="watchdogMainThinking" />
+            </Field>
+          </section>
+
           <div className="dshsub-actions">
-            <button className="dshsub-button dshsub-primary" disabled={!dirty || saving} onClick={() => void save()}>
-              {saving ? '保存中…' : '保存'}
+            <button type="button" className="dshsub-button dshsub-primary" disabled={!dirty || saving} onClick={() => void save()}>
+              {saving ? '保存中…' : '保存更改'}
             </button>
-            <button className="dshsub-button" disabled={saving} onClick={() => void resetAll()}>
+            <button type="button" className="dshsub-button" disabled={saving} onClick={() => void resetAll()}>
               恢复全部默认
             </button>
-            <span className="dshsub-dirty">{dirty ? '有未保存修改' : ''}</span>
+            <span className="dshsub-dirty" aria-live="polite">{dirty ? '有未保存修改' : ''}</span>
           </div>
-          {notice !== null ? <p className="dshsub-notice">{notice}</p> : null}
+          {notice !== null ? <p className="dshsub-notice" role="status">{notice}</p> : null}
+          <p className="dshsub-group-description">设置覆盖保存至 <code>~/.dsh/subagents/web-settings.json</code>。标记「重启后生效」的项目需要重启 dsh 或热重载插件。</p>
         </div>
       ) : null}
     </div>

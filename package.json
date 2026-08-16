@@ -15,6 +15,10 @@
     "docs:check": "node scripts/sync-docs.mjs --check",
     "docs:upstream": "node scripts/sync-upstream.mjs",
     "docs:upstream:check": "node scripts/sync-upstream.mjs --check",
-    "patch:web-settings-icon": "node scripts/patch-web-settings-icon.mjs"
+    "patch:web-settings-icon": "node scripts/patch-web-settings-icon.mjs",
+    "build:web": "pnpm --dir packages/dsh-web-app/web build"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
   }
 }

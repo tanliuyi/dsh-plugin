@@ -8,7 +8,7 @@ import * as path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ChildRecord, Details, FleetEntry, RetainedChild, ResultRow, RunRecord, RunState } from '../types.ts'
 import { DIRS, MAX_RETAINED_CHILDREN } from '../types.ts'
-import { writeJsonAtomic } from '../util.ts'
+import { readTextFile, writeJsonAtomic } from '../util.ts'
 
 /** RunStore 的构造选项。 */
 export interface RunStoreOptions {
@@ -154,6 +154,7 @@ export class RunStore {
       stopReason: child.stopReason,
       evidenceStatus: child.evidenceStatus,
       resumable: child.resumable,
+      structuredOutput: child.structuredOutput,
       missionId: run.missionId,
     }))
     this.persist(run)
@@ -208,6 +209,27 @@ export class RunStore {
     const dir = path.join(DIRS.async, this.sessionId, runId)
     await mkdir(dir, { recursive: true })
     return dir
+  }
+
+  /** 读取运行事件流（events.jsonl，最新 N 条在前；对齐上游 debug.run 的事件诊断）。 */
+  async readEvents(runId: string, limit = 50): Promise<Array<Record<string, unknown>>> {
+    try {
+      const dir = path.join(DIRS.async, this.sessionId, runId)
+      const text = await readTextFile(path.join(dir, 'events.jsonl'))
+      if (!text) return []
+      const events: Array<Record<string, unknown>> = []
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue
+        try {
+          events.push(JSON.parse(line) as Record<string, unknown>)
+        } catch {
+          // 损坏行跳过
+        }
+      }
+      return events.slice(-limit).reverse()
+    } catch {
+      return []
+    }
   }
 
   /** 写 status.json 投影。 */

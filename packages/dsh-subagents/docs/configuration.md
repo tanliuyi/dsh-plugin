@@ -27,12 +27,16 @@ All keys live in the plugin's cordis config (profile `cordis.patch.yml` / `confi
 | `scheduledRuns.maxPending` | `20` | Pending schedule cap. |
 | `intercomBridge.mode` | `always` | `always` \| `fork-only` \| `off` — child coordination instructions. |
 | `intercomBridge.resultDelivery` | `false` | Accepted for compatibility (no external result intercom in the dsh port). |
-| `watchdog.enabled` | `false` | Opt-in adversarial change reviewer. |
-| `watchdog.main.model` / `thinking` | inherit | Main watchdog model. |
-| `watchdog.children.model` / `overrides` | inherit | Child watchdog model / per-role overrides. |
-| `watchdog.scope.enabled` | `false` | Bounded current-scope monitoring (drift detection). |
-| `watchdog.cadence.everyNTools` | — | Extra non-blocking review every N tool results. |
-| `watchdog.autoFollow` | `{ blockers: false, maxAttempts: 3, stalemateRepeats: 3 }` | Queue follow-up instructions for blockers. |
+| `watchdog.enabled` | `false` | Opt-in adversarial change reviewer（完整移植自 pi-subagents，见 [watchdog.md](watchdog.md)）。 |
+| `watchdog.main.model` / `thinking` | inherit | Main watchdog model（严格解析到已注册 provider + 已发现模型）。 |
+| `watchdog.children.enabled` / `model` / `thinking` / `overrides` | off / inherit | Child watchdog 独立 runtime 与 per-role 覆盖。 |
+| `watchdog.scope.enabled` | `true` | 当前 scope 监控（漂移检测；默认开，对齐上游）。 |
+| `watchdog.cadence.everyNTools` | — | 每 N 个工具结果做 mid-run 评审（≥5；警告以 steer 注入运行中 agent）。 |
+| `watchdog.autoFollow` | `{ blockers: true, maxAttempts: 3, stalemateRepeats: 3 }` | blocker 排队后续修复指令（默认开，对齐上游）。 |
+| `watchdog.agentEndTimeoutMs` | `30000` | 边界评审超时（超时标 stale）。 |
+| `watchdog.severityThreshold` / `maxWarnings` | `concern` / — | 警告阈值与排放预算（emission guard）。 |
+| `watchdog.lsp.*` | on / 3s / 20 / 50 | LSP 预检（typescript-language-server；`enabled`/`timeoutMs`/`maxFiles`/`maxDiagnostics`）。 |
+| `watchdog.delivery` / `showDuringRun` / `syncBacklog` / `lateWarningPolicy` / `guidance` / `asyncCompletion` / `compactAtPercent` / `reviewRetryDelayMs` / `maxReviewFailures` | 见默认 | 上游字段面（解析/校验/展示；运行时行为见 [watchdog.md](watchdog.md)）。 |
 | `permissions.rules` | `{}` | Per-tool `allow`/`ask`/`deny` rules for child tool calls. `ask` degrades to `deny` in the dsh port (no interactive arbiter UI); `bash` is never gated. |
 | `artifactDir` | `temp` | `project` \| `session` \| `temp` artifact preference. |
 | `forceTopLevelAsync` | `false` | Force depth-0 runs into background. |

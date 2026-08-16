@@ -25,6 +25,8 @@ export interface WorkflowItem {
   gate?: string
   acceptance?: unknown
   output?: string | false
+  /** 结构化输出 JSON Schema（透传给 child 的 structuredOutputSchema）。 */
+  outputSchema?: Record<string, unknown>
 }
 
 /** runs.run / runs.all 的返回值。 */
@@ -53,6 +55,9 @@ export interface WorkflowRuntime {
   runs: {
     run(key: string, item: WorkflowItem): Promise<RunsApiResult>
     all(items: Array<WorkflowItem & { key: string }>): Promise<RunsApiResult[]>
+    status(keyOrRunId: string): RunsApiResult | undefined
+    ref(result: RunsApiResult): string
+    refs(results: RunsApiResult[]): string
   }
   state: WorkflowStateApi
   prompts: PromptsApi
@@ -224,7 +229,7 @@ export async function loadPromptTemplate(ref: string, dirs: WorkflowOptions['pro
  * 沙箱定时器受控：脚本创建的 timer 全部登记，结束（含中止/异常）时统一清理；
  * 异步等待有真实上限（signal 中止），同步死循环由 vm timeout 兜底。
  */
-export async function runWorkflowScript(options: WorkflowOptions): Promise<{ value: unknown; text: string }> {
+export async function runWorkflowScript(options: WorkflowOptions): Promise<{ value: unknown; text: string; emitted: unknown[] }> {
   const { script } = options
 
   const stateApi: WorkflowStateApi = {
@@ -251,19 +256,98 @@ export async function runWorkflowScript(options: WorkflowOptions): Promise<{ val
     },
   }
 
+/** 稳定 JSON 序列化（键排序），用于 workflow 同 key 指纹校验（对齐上游 stableRunJson）。 */
+function stableRunJson(value: unknown): string {
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort)
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {}
+      for (const key of Object.keys(v as Record<string, unknown>).sort()) out[key] = sort((v as Record<string, unknown>)[key])
+      return out
+    }
+    return v
+  }
+  return JSON.stringify(sort(value))
+}
+
+  // 已启动的 run（key → 结果，per-execution），供 runs.status 查询
+  const launched = new Map<string, RunsApiResult>()
+  // 同 key 指纹（per-execution），供 runs.run/runs.all 的重复 key 校验
+  const runFingerprints = new Map<string, string>()
+
   const runsApi = {
+    // 对齐上游 scripted-workflow.ts 的 runs 校验：
+    // - key 格式（1-128 字母数字 ._-，字母/数字开头）
+    // - 禁止把编排参数（action/workflowScript/tasks/chain/parallel/concurrency/chainDir）当子代理参数
+    // - 同 key 指纹校验：同一 key 用不兼容参数再次启动报错
+    // - worktree 必须 boolean；gate 与 acceptance 互斥
+    validateRunCall(key: string, item: unknown, label: string): WorkflowItem {
+      if (typeof key !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(key)) {
+        throw new Error(`${label} has an invalid key (1-128 chars, letters/digits/._-, starts with a letter or digit).`)
+      }
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error(`${label} requires an item object.`)
+      const params = item as Record<string, unknown>
+      for (const forbidden of ['action', 'workflowScript', 'tasks', 'chain', 'parallel', 'concurrency', 'chainDir']) {
+        if (Object.prototype.hasOwnProperty.call(params, forbidden)) {
+          throw new Error(`${label} accepts one child via { agent, task } and execution controls only; remove '${forbidden}'.`)
+        }
+      }
+      if (params.worktree !== undefined && typeof params.worktree !== 'boolean') throw new Error(`${label} worktree must be true or false.`)
+      if (params.gate !== undefined && (typeof params.gate !== 'string' || !params.gate.trim())) throw new Error(`${label} gate must be a non-empty command string.`)
+      if (params.gate !== undefined && params.acceptance !== undefined) throw new Error(`${label} gate cannot be combined with acceptance.`)
+      const fingerprint = stableRunJson(params)
+      const existing = runFingerprints.get(key)
+      if (existing !== undefined && existing !== fingerprint) {
+        throw new Error(`Duplicate workflow key '${key}' used with incompatible launch params.`)
+      }
+      runFingerprints.set(key, fingerprint)
+      return item as WorkflowItem
+    },
     async run(key: string, item: WorkflowItem): Promise<RunsApiResult> {
+      this.validateRunCall(key, item, 'runs.run')
       if (item.worktree) throw new Error('worktree isolation is not supported by the dsh port; remove `worktree: true`')
-      return options.onSpawn(key, item)
+      const result = await options.onSpawn(key, item)
+      launched.set(key, result)
+      return result
     },
     async all(items: Array<WorkflowItem & { key: string }>): Promise<RunsApiResult[]> {
-      const results = await Promise.all(items.map((item) => options.onSpawn(item.key, item)))
+      if (!Array.isArray(items)) throw new Error('runs.all(items) requires an array.')
+      const calls: Array<{ key: string; item: WorkflowItem }> = []
+      for (let index = 0; index < items.length; index++) {
+        if (!Object.prototype.hasOwnProperty.call(items, index)) throw new Error('runs.all items must not contain sparse entries.')
+        const item = items[index]
+        if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error(`runs.all item ${index} must be an object.`)
+        const { key, ...rest } = item as WorkflowItem & { key: string }
+        calls.push({ key, item: { ...rest, key } })
+        this.validateRunCall(key, rest, `runs.all item ${index}`)
+      }
+      const results = await Promise.all(calls.map(({ key, item }) => options.onSpawn(key, item)))
+      for (let index = 0; index < calls.length; index++) launched.set(calls[index]!.key, results[index]!)
       return results
+    },
+    status(keyOrRunId: string): RunsApiResult | undefined {
+      if (launched.has(keyOrRunId)) return launched.get(keyOrRunId)
+      for (const result of launched.values()) {
+        if (result.runId === keyOrRunId) return result
+      }
+      return undefined
+    },
+    ref(result: RunsApiResult): string {
+      if (!result || typeof result !== 'object') throw new Error('runs.ref(result) requires a run result object.')
+      const parts = [`run ${result.key || 'unknown'}`]
+      if (result.runId) parts.push(`id=${String(result.runId).slice(0, 8)}`)
+      return `[${parts.join('; ')}]`
+    },
+    refs(results: RunsApiResult[]): string {
+      if (!Array.isArray(results)) throw new Error('runs.refs(results) requires an array.')
+      return results.map((result) => this.ref(result)).join('\n')
     },
   }
 
   // 受控定时器：脚本创建的 setTimeout 全部登记，结束/中止时统一清理
   const scriptTimers = new Set<ReturnType<typeof setTimeout>>()
+  // emit 累计（对齐上游 scripted-workflow 的 emit(value)：可 JSON 序列化即可投递）
+  const emitted: unknown[] = []
   const sandbox = {
     runs: runsApi,
     state: stateApi,
@@ -273,6 +357,10 @@ export async function runWorkflowScript(options: WorkflowOptions): Promise<{ val
     Math,
     Date,
     console,
+    emit: (value: unknown): void => {
+      assertJsonValue(value, 'emit')
+      emitted.push(value)
+    },
     setTimeout: (callback: () => void, delay?: number): ReturnType<typeof setTimeout> => {
       const id = setTimeout(callback, Math.max(0, delay ?? 0))
       scriptTimers.add(id)
@@ -283,7 +371,8 @@ export async function runWorkflowScript(options: WorkflowOptions): Promise<{ val
       clearTimeout(id)
     },
   }
-  const context = vm.createContext(sandbox)
+  // 对齐上游：workflow 沙箱不提供动态代码生成（无 eval/Function 逃逸路径）
+  const context = vm.createContext(sandbox, { codeGeneration: { strings: false, wasm: false } })
   const wrapped = `(async () => {\n${script}\n})()`
   const program = new vm.Script(wrapped, { filename: 'workflowScript' })
 
@@ -307,6 +396,40 @@ export async function runWorkflowScript(options: WorkflowOptions): Promise<{ val
     for (const id of scriptTimers) clearTimeout(id)
     scriptTimers.clear()
   }
+  // 对齐上游 assertJsonValue：返回值与 emit 值必须是可 JSON 序列化的
+  assertJsonValue(value, 'workflow return')
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
-  return { value, text }
+  return { value, text, emitted }
+}
+
+/** 校验值可 JSON 序列化（对齐上游 scripted-workflow 的 assertJsonValue）。 */
+function assertJsonValue(value: unknown, label: string): void {
+  try {
+    JSON.stringify(value)
+  } catch (error) {
+    throw new Error(`${label} must be JSON-serializable (got ${typeof value}: ${error instanceof Error ? error.message : String(error)})`)
+  }
+  if (value !== undefined && typeof value === 'object') {
+    // 拒绝函数/符号/循环引用的显式检查（JSON.stringify 对函数返回 undefined 不报错）
+    const seen = new Set<object>()
+    const check = (node: unknown): void => {
+      if (node === null || typeof node !== 'object') return
+      if (typeof node === 'function' || typeof node === 'symbol' || typeof node === 'bigint') {
+        throw new Error(`${label} must be JSON-serializable (found ${typeof node} in value)`)
+      }
+      if (seen.has(node)) throw new Error(`${label} must not contain circular references`)
+      seen.add(node)
+      if (Array.isArray(node)) {
+        for (const item of node) check(item)
+      } else {
+        for (const key of Object.keys(node)) {
+          if (typeof (node as Record<string, unknown>)[key] === 'function') {
+            throw new Error(`${label} must be JSON-serializable (found function at '${key}')`)
+          }
+          check((node as Record<string, unknown>)[key])
+        }
+      }
+    }
+    check(value)
+  }
 }

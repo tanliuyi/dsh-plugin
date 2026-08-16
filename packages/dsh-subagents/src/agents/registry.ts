@@ -48,20 +48,22 @@ export function agentConfigFromFrontmatter(
   if (!rawName || rawName.trim() === '') return undefined
   const localName = rawName.trim()
   const { packageName } = parsePackageName(frontmatter['package'])
-  const aliases = parseFrontmatterList(frontmatter['aliases'])?.map((a) => a.toLowerCase())
+  const aliases = parseFrontmatterList(frontmatter['aliases']) ?? parseFrontmatterList(frontmatter['alias'])
+  const aliasesNormalized = aliases?.map((a) => a.toLowerCase())
   const acceptanceRaw = parseJsonField(frontmatter['acceptance'])
   const turnBudgetRaw = parseJsonField(frontmatter['turnBudget'])
   const memoryRaw = parseJsonField(frontmatter['memory'])
   const tools = parseFrontmatterList(frontmatter['tools'])
   const model = optionalString(frontmatter['model'])
   const thinkingRaw = frontmatter['thinking']
-  const thinking = thinkingRaw === 'false' ? false : optionalString(thinkingRaw)
+  // 'off' 与 'false' 都表示关闭思考（对齐上游 serializer 对 'off' 的专门处理）
+  const thinking = thinkingRaw === 'false' || thinkingRaw === 'off' ? false : optionalString(thinkingRaw)
   return {
     name: buildRuntimeName(localName, packageName),
     localName,
     packageName,
     description: optionalString(frontmatter['description']) ?? '',
-    aliases,
+    aliases: aliasesNormalized,
     tools,
     extensions: parseFrontmatterList(frontmatter['extensions']),
     model,

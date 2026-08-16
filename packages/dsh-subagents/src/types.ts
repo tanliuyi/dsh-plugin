@@ -84,6 +84,14 @@ export interface SubagentsConfig {
   watchdog: WatchdogConfig
   /** 子代理工具权限规则（全局）。 */
   permissions: { rules: Record<string, 'allow' | 'ask' | 'deny'> }
+  /** 能力上限（对齐上游 capability-ceiling）：受限工具移除、受限 agent 拒绝。 */
+  capabilityCeiling?: {
+    version: 1
+    allowedTools?: string[]
+    allowedAgents?: string[]
+    denyExtensions: boolean
+    sources: string[]
+  }
   /** 调试产物目录偏好（project | session | temp）。 */
   artifactDir: 'project' | 'session' | 'temp'
   /** 强制顶层 async。 */
@@ -109,14 +117,34 @@ export interface AgentOverride {
   systemPrompt?: string
 }
 
-/** watchdog 配置。 */
+/** watchdog 配置（对齐上游 ResolvedWatchdogConfig 的字段面；缺省值见 watchdog/settings.ts）。 */
 export interface WatchdogConfig {
   enabled: boolean
-  main: { model?: string; thinking?: string | false }
-  children: { model?: string; overrides: Record<string, { model?: string; thinking?: string | false }> }
-  scope: { enabled: boolean }
-  cadence: { everyNTools?: number }
+  delivery?: 'held'
+  showDuringRun?: boolean
+  syncBacklog?: 'off' | number
+  agentEndTimeoutMs?: number
+  lateWarningPolicy?: 'show-stale-no-autofollow'
+  severityThreshold?: 'concern' | 'blocker'
+  maxWarnings?: number | null
+  guidance?: { watchdogMd?: boolean; systemPromptPath?: string | null }
   autoFollow: { blockers: boolean; maxAttempts: number; stalemateRepeats: number }
+  scope: { enabled: boolean }
+  cadence: { everyNTools?: number | null }
+  main: { model?: string; thinking?: string | false }
+  children: {
+    enabled?: boolean
+    model?: string
+    thinking?: string | false
+    watchdogTailTimeoutMs?: number
+    autoFollow?: { blockers?: boolean; maxAttempts?: number | null; stalemateRepeats?: number }
+    overrides: Record<string, { enabled?: boolean; model?: string; thinking?: string | false }>
+  }
+  asyncCompletion?: { enabled?: boolean; autoFollowBlockers?: boolean }
+  lsp?: { enabled?: boolean; timeoutMs?: number; maxFiles?: number; maxDiagnostics?: number }
+  compactAtPercent?: number
+  reviewRetryDelayMs?: number
+  maxReviewFailures?: number
 }
 
 /** 已解析的 Agent 配置。 */
@@ -201,6 +229,8 @@ export interface ResultRow {
   evidenceStatus?: string
   resumable?: boolean
   missionId?: string
+  /** structuredOutputSchema 校验后的结构化结果。 */
+  structuredOutput?: unknown
 }
 
 /** 运行记录（内存 + 磁盘 status.json 投影）。 */
@@ -255,6 +285,8 @@ export interface ChildRecord {
   stopReason?: string
   evidenceStatus?: string
   resumable?: boolean
+  /** structuredOutputSchema 校验后的结构化结果。 */
+  structuredOutput?: unknown
   run?: SubagentRun
   localAgent?: Agent
   /** 完成后的 follow_up 简短待办（下次 resume 时作为首条简报）。 */
@@ -289,6 +321,8 @@ export interface SubagentsParams {
   includeProgress?: boolean
   share?: boolean
   sessionDir?: string
+  /** 结构化输出 JSON Schema：child 必须以符合 schema 的结构化结果收尾（dsh 平台原生 outputSchema）。 */
+  structuredOutputSchema?: Record<string, unknown>
   index?: number
   lines?: number
   mode?: 'steer' | 'follow_up' | 'auto'
@@ -311,6 +345,14 @@ export interface SubagentsParams {
   model?: string
   replyTo?: string
   focus?: boolean
+  /** mission.update 的更新对象（对齐上游 missionUpdate 参数面）。 */
+  missionUpdate?: Record<string, unknown>
+  /** mission.create / mission.close 的目标状态（对齐上游 missionStatus）。 */
+  missionStatus?: string
+  /** mission.attach-run 的附加 run 模式（对齐上游 runMode）。 */
+  runMode?: string
+  /** mission.attach-run 的附加 run 状态（对齐上游 runStatus）。 */
+  runStatus?: string
   handoffPath?: string
 }
 
@@ -331,6 +373,8 @@ export interface Details {
   fleet?: FleetEntry[]
   totalActive?: number
   text?: string
+  /** debug.run 事件诊断条数。 */
+  events?: number
 }
 
 /** fleet 状态条目。 */

@@ -17,6 +17,7 @@ import {
 import type { HermesRuntime } from '../runtime.ts'
 import { runMemoryCompletion } from './llm-run.ts'
 import { collectSessionParts, isDirectUserMessage } from './session-util.ts'
+import { isMinimalSessionPreset } from '../presets.ts'
 
 /** 每会话 flush 状态。 */
 interface FlushState {
@@ -28,8 +29,13 @@ interface FlushState {
  * 设置会话 flush。
  * @param ctx - 插件上下文
  * @param runtime - 插件运行时
+ * @param isDisabledSession - 判定「该会话禁用自动行为」的谓词（默认 minimal 预设）。
  */
-export function setupSessionFlush(ctx: Context, runtime: HermesRuntime): void {
+export function setupSessionFlush(
+  ctx: Context,
+  runtime: HermesRuntime,
+  isDisabledSession: (session: Session) => boolean = isMinimalSessionPreset,
+): void {
   const { config, store, projectStores } = runtime
   const states = new Map<string, FlushState>()
 
@@ -100,8 +106,9 @@ export function setupSessionFlush(ctx: Context, runtime: HermesRuntime): void {
     }
   }
 
-  // 计数用户轮次 + 压缩前 flush。
+  // 计数用户轮次 + 压缩前 flush（minimal 会话跳过）。
   ctx.on('session/event', (session, event) => {
+    if (isDisabledSession(session)) return
     const state = stateFor(session.id)
     if (isDirectUserMessage(event as { type: string; data?: { source?: { kind?: string } } })) {
       state.userTurnCount++
@@ -114,10 +121,11 @@ export function setupSessionFlush(ctx: Context, runtime: HermesRuntime): void {
     }
   })
 
-  // 会话结束 flush（agent 离开注册表时，日志仍可读）。
+  // 会话结束 flush（agent 离开注册表时，日志仍可读；minimal 会话跳过）。
   ctx.on('agent/disposed', (payload) => {
     if (!config.flushOnShutdown) return
     const session = payload.agent.session
+    if (isDisabledSession(session)) return
     void flush(session, 10_000)
   })
 }

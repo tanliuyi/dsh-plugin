@@ -25,6 +25,7 @@ import { getMessageText } from '../types.ts'
 import type { HermesRuntime } from '../runtime.ts'
 import { runMemoryCompletion } from './llm-run.ts'
 import { collectSessionParts, isDirectUserMessage } from './session-util.ts'
+import { isMinimalSessionPreset } from '../presets.ts'
 
 /**
  * 从纠正消息提取指令部分。
@@ -132,8 +133,13 @@ interface CorrectionState {
  * 设置纠正检测器。
  * @param ctx - 插件上下文
  * @param runtime - 插件运行时
+ * @param isDisabledSession - 判定「该会话禁用自动行为」的谓词（默认 minimal 预设）。
  */
-export function setupCorrectionDetector(ctx: Context, runtime: HermesRuntime): void {
+export function setupCorrectionDetector(
+  ctx: Context,
+  runtime: HermesRuntime,
+  isDisabledSession: (session: Session) => boolean = isMinimalSessionPreset,
+): void {
   if (!runtime.config.correctionDetection) return
 
   const { config, store, projectStores } = runtime
@@ -149,6 +155,7 @@ export function setupCorrectionDetector(ctx: Context, runtime: HermesRuntime): v
   }
 
   ctx.on('session/event', (session, event) => {
+    if (isDisabledSession(session)) return
     const state = stateFor(session.id)
 
     // user/message 时打标（仅真人消息）

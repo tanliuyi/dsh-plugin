@@ -15,6 +15,13 @@ export interface MissionActionInput {
   decisionId?: string
   runId?: string
   missionScope?: 'project' | 'global'
+  /** 对齐上游 missionUpdate（mission.update 的更新对象）。 */
+  missionUpdate?: Record<string, unknown>
+  /** 对齐上游 missionStatus（mission.create / mission.close 的目标状态）。 */
+  missionStatus?: string
+  /** 对齐上游 runMode / runStatus（mission.attach-run 的附加 run 元数据）。 */
+  runMode?: string
+  runStatus?: string
 }
 
 function fmt(record: MissionRecord): string {
@@ -111,25 +118,27 @@ export async function runMissionAction(
       if (!input.missionId) return { text: 'mission.update requires missionId' }
       const record = await store.get(input.missionId)
       if (!record) return { text: `mission ${input.missionId} not found` }
+      // 对齐上游：missionUpdate 是官方更新对象；config 保持向后兼容
       const config = typeof input.config === 'string' ? safeParseJson(input.config) : input.config
-      if (config) {
-        if (typeof config['summary'] === 'string') record.summary = config['summary']
-        if (typeof config['objective'] === 'string') record.objective = config['objective']
-        if (Array.isArray(config['labels'])) record.labels = config['labels'].map(String)
-        if (config['goal'] === false) record.goal = false
-        if (typeof config['goal'] === 'object' && config['goal'] !== null) {
-          const goal = config['goal'] as Record<string, unknown>
+      const update = input.missionUpdate ?? (config as Record<string, unknown> | undefined)
+      if (update) {
+        if (typeof update['summary'] === 'string') record.summary = update['summary']
+        if (typeof update['objective'] === 'string') record.objective = update['objective']
+        if (Array.isArray(update['labels'])) record.labels = update['labels'].map(String)
+        if (update['goal'] === false) record.goal = false
+        if (typeof update['goal'] === 'object' && update['goal'] !== null) {
+          const goal = update['goal'] as Record<string, unknown>
           if (goal['paused'] === true) record.goalPaused = true
           if (goal['paused'] === false) record.goalPaused = false
           if (goal['paused'] === undefined && goal['enabled'] === false) record.goal = false
         }
-        if (Array.isArray(config['artifacts'])) {
-          for (const artifact of config['artifacts']) {
+        if (Array.isArray(update['artifacts'])) {
+          for (const artifact of update['artifacts']) {
             if (typeof artifact === 'string' && !record.artifacts.includes(artifact)) record.artifacts.push(artifact)
           }
         }
-        if (Array.isArray(config['receipts'])) {
-          for (const receipt of config['receipts']) {
+        if (Array.isArray(update['receipts'])) {
+          for (const receipt of update['receipts']) {
             if (typeof receipt === 'object' && receipt !== null) {
               const r = receipt as Record<string, unknown>
               if (typeof r['kind'] === 'string' && typeof r['status'] === 'string' && typeof r['title'] === 'string') {
@@ -145,8 +154,8 @@ export async function runMissionAction(
             }
           }
         }
-        if (Array.isArray(config['decisions'])) {
-          for (const decision of config['decisions']) {
+        if (Array.isArray(update['decisions'])) {
+          for (const decision of update['decisions']) {
             if (typeof decision === 'object' && decision !== null) {
               const d = decision as Record<string, unknown>
               if (typeof d['question'] === 'string') {
@@ -160,7 +169,7 @@ export async function runMissionAction(
             }
           }
         }
-        if (typeof config['nextReadyAction'] === 'string') record.nextReadyAction = config['nextReadyAction']
+        if (typeof update['nextReadyAction'] === 'string') record.nextReadyAction = update['nextReadyAction']
       }
       if (record.decisions.some((d) => !d.resolution)) {
         if (record.status === 'active' || record.status === 'completed') record.status = 'needs_decision'
@@ -184,11 +193,14 @@ export async function runMissionAction(
       if (!input.missionId || !input.runId) return { text: 'mission.attach-run requires missionId and runId' }
       const record = await store.get(input.missionId)
       if (!record) return { text: `mission ${input.missionId} not found` }
+      // 对齐上游：runMode / runStatus 透传附加 run 元数据（缺省 running）
+      const config = typeof input.config === 'object' && input.config !== null ? input.config : {}
       await store.attachRun(input.missionId, {
         runId: input.runId,
-        agent: typeof input.config === 'object' && input.config !== null && typeof input.config['agent'] === 'string' ? input.config['agent'] : 'unknown',
-        task: typeof input.config === 'object' && input.config !== null && typeof input.config['task'] === 'string' ? input.config['task'] : '',
-        status: 'running',
+        agent: typeof config['agent'] === 'string' ? config['agent'] : 'unknown',
+        task: typeof config['task'] === 'string' ? config['task'] : '',
+        status: input.runStatus ?? 'running',
+        mode: input.runMode,
         updatedAt: Date.now(),
       })
       return { text: `Attached run ${input.runId} to mission ${record.id}`, missionId: record.id, status: record.status }
@@ -197,11 +209,11 @@ export async function runMissionAction(
       if (!input.missionId) return { text: 'mission.close requires missionId' }
       const record = await store.get(input.missionId)
       if (!record) return { text: `mission ${input.missionId} not found` }
-      const status = input.summary ? undefined : undefined
-      void status
-      await store.close(input.missionId, 'completed', input.summary)
+      // 对齐上游：missionStatus 指定关闭状态（缺省 completed）
+      const status = input.missionStatus ?? 'completed'
+      await store.close(input.missionId, status as never, input.summary)
       const updated = await store.get(input.missionId)
-      return { text: `Closed mission ${record.id} (completed)`, missionId: record.id, status: updated?.status }
+      return { text: `Closed mission ${record.id} (${status})`, missionId: record.id, status: updated?.status }
     }
     default:
       return { text: `unknown mission action: ${input.action}` }

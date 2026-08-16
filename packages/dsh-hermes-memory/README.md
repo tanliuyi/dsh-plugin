@@ -13,6 +13,12 @@
 - 📌 **常驻指令** — `/memory-pin` 注入每个会话的硬规则
 - 🏷️ **记忆分类** — failure / correction / insight / preference / convention / tool-quirk
 
+## Minimal 预设
+
+DSH 的 `minimal` 预设承诺只向模型提供持久 `bash` 与 `str_replace_editor`。本插件会在 live minimal agent 的 scope 中移除全部 memory/session/skill 模型工具；空白会话在首次回合前切换 preset 时会同步安装或撤销限制。`complete` persona 会抑制 Hermes prompt section，后台 review、纠正检测、session flush 与项目存储预热也会跳过 minimal 会话。
+
+记忆存储和索引等 host 服务仍可常驻。DSH 当前的 command/skill registry 是 host-global，尚无 preset-scoped 可见性 API，因此 memory command 和 skill 名称仍可能出现在 UI 清单中；这不使对应模型工具或自动记忆行为在 minimal 中生效。
+
 ## 安装
 
 ```sh

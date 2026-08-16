@@ -59,3 +59,70 @@ test('packagePromptsDir resolves to the shipped prompts dir', async () => {
   const body = await readFile(`${dir}/parallel-review.md`, 'utf8')
   assert.ok(body.includes('Launch parallel reviewers'))
 })
+
+test('runs.status / runs.ref / runs.refs: 查询与引用（对齐上游）', async () => {
+  const { runWorkflowScript } = await import('../src/runs/workflow.ts')
+  const result = await runWorkflowScript({
+    script: `
+      const a = await runs.run('alpha', { agent: 'delegate', task: 't1' })
+      const byKey = runs.status('alpha')
+      const byId = runs.status(a.runId ?? 'nope')
+      return {
+        byKey: byKey?.status,
+        byId: byId?.key,
+        ref: runs.ref(a),
+        refs: runs.refs([a]),
+      }
+    `,
+    run: {} as never,
+    params: {} as never,
+    promptDirs: { package: '', user: '', project: '' },
+    onSpawn: async (key) => ({ key, agent: 'delegate', runId: `run-${key}`, output: 'ok', status: 'completed', artifactPaths: {} }),
+  })
+  const value = result.value as { byKey?: string; byId?: string; ref: string; refs: string }
+  assert.equal(value.byKey, 'completed')
+  assert.equal(value.byId, 'alpha')
+  assert.ok(value.ref.includes('run alpha'))
+  assert.ok(value.ref.includes('id=run-alph'))
+  assert.ok(value.refs.includes('run alpha'))
+})
+
+test('runs.run: 同 key 指纹校验（同一 key 不兼容参数报错，对齐上游）', async () => {
+  const { runWorkflowScript } = await import('../src/runs/workflow.ts')
+  const result = await runWorkflowScript({
+    script: `
+      await runs.run('dup', { agent: 'delegate', task: 't1' })
+      try {
+        await runs.run('dup', { agent: 'delegate', task: 'DIFFERENT' })
+        return { rejected: false }
+      } catch (error) {
+        return { rejected: true, message: String(error) }
+      }
+    `,
+    run: {} as never,
+    params: {} as never,
+    promptDirs: { package: '', user: '', project: '' },
+    onSpawn: async (key) => ({ key, agent: 'delegate', runId: `run-${key}`, output: 'ok', status: 'completed', artifactPaths: {} }),
+  })
+  const value = result.value as { rejected?: boolean; message?: string }
+  assert.equal(value.rejected, true)
+  assert.ok(value.message!.includes('Duplicate workflow key'))
+})
+
+test('runs.run: 非法 key 与禁止参数校验', async () => {
+  const { runWorkflowScript } = await import('../src/runs/workflow.ts')
+  const result = await runWorkflowScript({
+    script: `
+      try { await runs.run('bad key!', { agent: 'delegate', task: 't' }); return { a: 'not-rejected' } } catch (e) { }
+      try { await runs.run('k', { agent: 'delegate', task: 't', workflowScript: 'x' }); return { b: 'not-rejected' } } catch (e) { }
+      return { a: 'rejected', b: 'rejected' }
+    `,
+    run: {} as never,
+    params: {} as never,
+    promptDirs: { package: '', user: '', project: '' },
+    onSpawn: async (key) => ({ key, agent: 'delegate', runId: `run-${key}`, output: 'ok', status: 'completed', artifactPaths: {} }),
+  })
+  const value = result.value as { a?: string; b?: string }
+  assert.equal(value.a, 'rejected')
+  assert.equal(value.b, 'rejected')
+})

@@ -6,6 +6,7 @@
 import type { SubagentsDeps, ExecContext, SessionState } from './runs/execution.ts'
 import { builtinAgentsDir, userAgentsDir } from './agents/registry.ts'
 import { resolveProjectRoot } from './util.ts'
+import { resolveWatchdogConfig } from './watchdog/settings.ts'
 
 export async function doctor(deps: SubagentsDeps, exec: ExecContext, state: SessionState): Promise<string> {
   const lines: string[] = []
@@ -64,8 +65,15 @@ export async function doctor(deps: SubagentsDeps, exec: ExecContext, state: Sess
   const bridgeMode = deps.config.intercomBridge.mode
   lines.push(`intercom bridge mode: ${bridgeMode}`)
 
-  // watchdog
-  lines.push(`watchdog: ${deps.config.watchdog.enabled ? 'enabled' : 'disabled (opt-in)'}${deps.config.watchdog.main.model ? ` · model ${deps.config.watchdog.main.model}` : ''}`)
+  // watchdog（显示解析后的有效配置：config 面 + 用户/项目文件 + 会话覆盖）
+  const watchdogResolved = resolveWatchdogConfig(exec.cwd, { config: deps.config.watchdog, home: deps.home })
+  const wd = watchdogResolved.ok ? watchdogResolved.config : undefined
+  if (wd) {
+    lines.push(`watchdog: ${wd.main.enabled ? 'enabled' : 'disabled (opt-in)'}${wd.main.model ? ` · model ${wd.main.model}` : ''}${wd.children.enabled ? ' · children on' : ''}`)
+  } else {
+    lines.push('watchdog: config errors — disabled until fixed')
+    for (const error of watchdogResolved.errors) lines.push(`  ⚠ ${error.message}`)
+  }
 
   // 可选服务
   lines.push(`jobs service: ${ctx.get('jobs') ? 'available' : 'missing (background runs disabled)'}`)

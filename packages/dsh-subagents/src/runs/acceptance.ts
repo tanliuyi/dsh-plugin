@@ -3,7 +3,7 @@
  * acceptance-report 解析、evidence 状态与 `gate` 一键验证命令。
  */
 
-import { execFile } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import type { AcceptanceSpec, AgentConfig, SubagentsParams } from '../types.ts'
 import { DEFAULT_GATE_TIMEOUT_MS } from '../types.ts'
 
@@ -20,8 +20,22 @@ export interface ResolvedAcceptance {
   review?: { required?: boolean; agent?: string }
 }
 
-const WRITER_HINTS = /implement|fix|write|edit|refactor|build|add .*feature|create|update|apply|change|migrate|upgrade|debug|repair/
-const READONLY_HINTS = /review|inspect|read|analyze|summarize|scout|research|lookup|check|validate|audit/
+import { classifyTaskMutationIntent, stripSeverityCompounds, taskMayMutate } from './task-intent.ts'
+
+/**
+ * 推断验收级别与 review 需求（对齐上游 pi-subagents acceptance.ts 的 inferLevel：
+ * classifyTaskMutationIntent + taskMayMutate + role/agent 启发式 + risky 关键词）。
+ */
+
+/** 上游 requiredEvidenceForLevel 的 evidence 集。 */
+function requiredEvidenceForLevel(level: 'none' | 'attested' | 'checked' | 'verified'): string[] {
+  switch (level) {
+    case 'none': return []
+    case 'attested': return ['manual-notes', 'residual-risks']
+    case 'checked': return ['changed-files', 'tests-added', 'commands-run', 'residual-risks', 'no-staged-files']
+    case 'verified': return ['changed-files', 'tests-added', 'commands-run', 'validation-output', 'residual-risks', 'no-staged-files']
+  }
+}
 
 /** 推断验收级别与 review 需求（对应 pi 的 acceptance inference）。 */
 export function inferAcceptance(
@@ -30,7 +44,6 @@ export function inferAcceptance(
   isAsync: boolean,
 ): { spec: ResolvedAcceptance; inferred: boolean } {
   const task = params.task ?? ''
-  const lower = task.toLowerCase()
   const explicit = params.acceptance
   const agentLevel = agent.acceptance?.level
   const role = agent.acceptanceRole
@@ -51,28 +64,69 @@ export function inferAcceptance(
     return { spec: normalizeLevel(agentLevel, agent, params, isAsync), inferred: true }
   }
 
-  const mutation = WRITER_HINTS.test(lower)
-  const readonly = READONLY_HINTS.test(lower) && !mutation
-  const isWriter = role === 'writer' || (mutation && role !== 'read-only') || (!readonly && !role && /worker|implementer|developer|coder/.test(agent.name))
-  const isReadOnly = role === 'read-only' || (readonly && role !== 'writer')
+  // 对齐上游 inferLevel：declared role 替换名称启发式，用完整 writer 文法独立检测
+  const agentName = agent.name.toLowerCase()
+  const intent = classifyTaskMutationIntent(role ? 'worker' : agent.name, task)
+  const readOnlyTask = intent.kind === 'read-only'
+    || (intent.kind === 'unknown' && /\b(?:read[- ]only|review[- ]only|no edits|without edits|inspect|summari[sz]e)\b/i.test(task))
+  const rolePatchTask = role !== undefined
+    && intent.kind !== 'read-only'
+    && !/\b(?:do not|don't|must not)\s+patch\b/i.test(task)
+    && /\bpatch\s+(?:(?:\.{0,2}[\\/])?(?:[\w.-]+[\\/])+[\w.-]+|[\w.-]+\.[a-z0-9]+\b|(?:the\s+)?parser\b)/i.test(stripSeverityCompounds(task))
+  const taskMayWrite = readOnlyTask ? false : taskMayMutate(task) || intent.kind === 'implementation' || rolePatchTask
+  const readOnlyAgent = role === 'read-only'
+    || (role === undefined && /\b(?:reviewer|oracle|scout|researcher|analyst)\b/.test(agentName))
+  const writeTask = taskMayWrite
+    || (role === 'writer' && !readOnlyTask)
+    || (role === undefined && /\bworker\b/.test(agentName) && !readOnlyTask)
+  const inferredReadOnly = readOnlyTask || (role === 'read-only' && !taskMayWrite)
+  const keywordRiskReadOnly = role === undefined ? intent.kind === 'read-only' : inferredReadOnly
+  const risky = Boolean(isAsync && writeTask)
+    || (!keywordRiskReadOnly && /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/i.test(task))
 
-  if (isReadOnly) {
-    return { spec: { level: 'attested', criteria: [], evidence: [], verify: [] }, inferred: true }
-  }
-  if (isWriter) {
-    const risky = isAsync || /risky|production|migration|breaking|security/i.test(lower)
-    if (risky) {
-      return {
-        spec: { level: 'checked', criteria: [], evidence: ['changed-files', 'tests-added', 'commands-run', 'residual-risks', 'no-staged-files'], verify: [], review: { required: true, agent: 'reviewer' } },
-        inferred: true,
-      }
-    }
+  if (risky) {
     return {
-      spec: { level: 'checked', criteria: [], evidence: ['changed-files', 'tests-added', 'commands-run', 'residual-risks'], verify: [] },
+      spec: {
+        level: 'checked',
+        criteria: ['Implement the requested change without widening scope', 'Return evidence sufficient for an independent acceptance review'],
+        evidence: requiredEvidenceForLevel('checked'),
+        verify: [],
+        review: { required: true, agent: 'reviewer' },
+      },
       inferred: true,
     }
   }
-  return { spec: { level: 'attested', criteria: [], evidence: [], verify: [] }, inferred: true }
+  if (writeTask && !readOnlyTask) {
+    return {
+      spec: {
+        level: 'checked',
+        criteria: ['Implement the requested change without widening scope'],
+        evidence: requiredEvidenceForLevel('checked'),
+        verify: [],
+      },
+      inferred: true,
+    }
+  }
+  if (readOnlyAgent || readOnlyTask) {
+    return {
+      spec: {
+        level: 'attested',
+        criteria: ['Return concrete findings with file paths and severity when applicable'],
+        evidence: ['review-findings', 'residual-risks'],
+        verify: [],
+      },
+      inferred: true,
+    }
+  }
+  return {
+    spec: {
+      level: 'attested',
+      criteria: ['Return a concise result and residual risks when applicable'],
+      evidence: ['manual-notes', 'residual-risks'],
+      verify: [],
+    },
+    inferred: true,
+  }
 }
 
 function normalizeLevel(level: AcceptanceSpec['level'] | undefined, agent: AgentConfig, params: SubagentsParams, isAsync: boolean): ResolvedAcceptance {
@@ -80,7 +134,13 @@ function normalizeLevel(level: AcceptanceSpec['level'] | undefined, agent: Agent
   switch (level) {
     case 'none': throw new Error('acceptance level "none" requires a reason: use { level: "none", reason: "..." }')
     case 'attested': return { level: 'attested', criteria: [], evidence: [], verify: [] }
-    case 'verified': return { ...base, level: 'verified', review: undefined }
+    case 'verified': {
+      // 对齐上游：verified 强制至少一条 verify 命令
+      if (base.verify.length === 0) {
+        throw new Error('acceptance level "verified" requires at least one verify command (use `gate` or acceptance.verify)')
+      }
+      return { ...base, level: 'verified', review: undefined }
+    }
     default: return { ...base, level: 'checked' }
   }
 }
@@ -95,6 +155,10 @@ function normalizeSpec(spec: AcceptanceSpec, agent: AgentConfig, params: Subagen
   }
   if ((spec.level as string) === 'reviewed') {
     throw new Error('"reviewed" is not a policy level; use { level: "checked", review: { required: true, agent: "reviewer" } } and orchestrate the reviewer separately')
+  }
+  if (spec.level === 'verified' && (!Array.isArray(spec.verify) || spec.verify.length === 0)) {
+    // 对齐上游：verified 强制至少一条 verify 命令
+    throw new Error('acceptance level "verified" requires at least one verify command (use `gate` or acceptance.verify)')
   }
   return {
     level: spec.level === 'none' ? 'none' : spec.level,
@@ -256,4 +320,19 @@ export function computeEvidenceStatus(
     return 'review-required'
   }
   return 'checked'
+}
+
+/**
+ * 运行时检查：`no-staged-files` evidence 的真实 git 校验
+ * （对齐上游 acceptance.ts checkNoStagedFiles：git status --short 中暂存区非空即失败）。
+ */
+export function checkNoStagedFiles(cwd: string): { passed: boolean; message: string } {
+  const result = spawnSync('git', ['status', '--short'], { cwd, encoding: 'utf-8' })
+  if (result.status !== 0) {
+    return { passed: true, message: 'git status unavailable; no staged-files check skipped' }
+  }
+  const staged = result.stdout.split(/\r?\n/).filter((line) => line.length >= 2 && line[0] !== ' ' && line[0] !== '?')
+  return staged.length === 0
+    ? { passed: true, message: 'No staged files detected.' }
+    : { passed: false, message: `Staged files present: ${staged.join(', ')}` }
 }

@@ -17,6 +17,7 @@ import {
 import type { HermesRuntime } from '../runtime.ts'
 import { runMemoryCompletion } from './llm-run.ts'
 import { collectSessionParts, isDirectUserMessage } from './session-util.ts'
+import { isMinimalSessionPreset } from '../presets.ts'
 
 /** 每会话的 review 计数状态。 */
 interface ReviewState {
@@ -61,8 +62,14 @@ function buildDirectReviewUserPrompt(
  * 设置后台学习循环。
  * @param ctx - 插件上下文
  * @param runtime - 插件运行时
+ * @param isDisabledSession - 判定「该会话禁用自动行为」的谓词（默认 minimal 预设）；
+ *   为 true 的会话（如 minimal 双工具编码）不参与后台 review。
  */
-export function setupBackgroundReview(ctx: Context, runtime: HermesRuntime): void {
+export function setupBackgroundReview(
+  ctx: Context,
+  runtime: HermesRuntime,
+  isDisabledSession: (session: Session) => boolean = isMinimalSessionPreset,
+): void {
   const { config, store, projectStores } = runtime
   const states = new Map<string, ReviewState>()
 
@@ -127,6 +134,7 @@ export function setupBackgroundReview(ctx: Context, runtime: HermesRuntime): voi
   }
 
   ctx.on('session/event', (session, event) => {
+    if (isDisabledSession(session)) return
     const state = stateFor(session.id)
 
     if (isDirectUserMessage(event as { type: string; data?: { source?: { kind?: string } } })) {

@@ -23,6 +23,8 @@ export interface MissionRunRef {
   updatedAt: number
   sessionFile?: string
   artifactDir?: string
+  /** 对齐上游 runMode（附加 run 模式）。 */
+  mode?: string
 }
 
 /** mission 中待决/已决的决策。 */

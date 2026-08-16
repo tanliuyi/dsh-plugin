@@ -4,9 +4,10 @@
  */
 
 import type { AgentConfig, SubagentsParams } from '../types.ts'
+import { createHash } from 'node:crypto'
 import { resolveProjectRoot } from '../util.ts'
 import type { SubagentsDeps, ExecContext } from './execution.ts'
-import { agentConfigFromManagementConfig, deleteAgent, ejectAgent, listScopeAgentFiles, readRefinement, refinementsDir, resetAgent, resolveManagementTarget, rollbackRefinement, setAgentDisabled, validateRefinementProposal, writeAgentFile, writeRefinement } from '../agents/management.ts'
+import { agentConfigFromManagementConfig, deleteAgent, ejectAgent, listScopeAgentFiles, parseRefinementMeta, readRefinement, refinementsDir, resetAgent, resolveManagementTarget, rollbackRefinement, setAgentDisabled, validateRefinementProposal, writeAgentFile, writeRefinement } from '../agents/management.ts'
 import { readTextFile, writeJsonAtomic } from '../util.ts'
 import { resolveLlmRoute, streamText } from '../llm.ts'
 
@@ -21,6 +22,9 @@ function fmtAgent(agent: AgentConfig): string {
     agent.defaultContext ? `Default context: ${agent.defaultContext}` : '',
     agent.timeoutMs ? `Timeout: ${agent.timeoutMs}ms` : '',
     agent.acceptance ? `Acceptance: ${JSON.stringify(agent.acceptance)}` : '',
+    agent.defaultReads?.length ? `Reads: ${agent.defaultReads.join(', ')}` : '',
+    agent.defaultProgress ? 'Progress: true' : '',
+    agent.memory ? `Memory: ${JSON.stringify(agent.memory)}` : '',
     agent.scope !== 'builtin' && agent.file ? `File: ${agent.file}` : `Scope: ${agent.scope}`,
   ].filter(Boolean)
   if (agent.systemPrompt) lines.push('', '## System prompt', '', agent.systemPrompt.slice(0, 3000))
@@ -157,7 +161,19 @@ export async function runAgentManagementAction(
     case 'refine.show': {
       if (!params.agent) return { text: 'refine.show requires agent', details: { kind: 'error', results: [] } }
       const overlay = await readRefinement(projectRoot, params.agent)
-      return { text: overlay ? `Refinement overlay for ${params.agent}:\n\n${overlay}` : `No refinement overlay for ${params.agent}`, details: { kind: 'refine', results: [] } }
+      if (!overlay) return { text: `No refinement overlay for ${params.agent}`, details: { kind: 'refine', results: [] } }
+      // base-prompt 漂移检测（对齐上游 agent-refinements：记录写入时的 base prompt 哈希，
+      // 当前 base prompt 变化时提示覆盖层可能过时）
+      const meta = parseRefinementMeta(overlay)
+      let driftNote = ''
+      if (meta.basePromptSha256) {
+        const resolved = await registry.resolve(params.agent, params.agentScope ?? 'both', projectRoot)
+        const currentHash = resolved.agent ? sha256Hex(resolved.agent.systemPrompt) : undefined
+        if (currentHash && currentHash !== meta.basePromptSha256) {
+          driftNote = `\n\n⚠ base prompt has changed since this overlay was written (basePromptSha256 mismatch) — guidance may be stale; consider \`refine\` again.`
+        }
+      }
+      return { text: `Refinement overlay for ${params.agent}:\n\n${overlay}${driftNote}`, details: { kind: 'refine', results: [] } }
     }
     case 'refine.rollback': {
       if (!params.agent) return { text: 'refine.rollback requires agent', details: { kind: 'error', results: [] } }
@@ -182,7 +198,7 @@ export async function runAgentManagementAction(
       if (!proposal) return { text: 'refine proposal generation failed', details: { kind: 'error', results: [] } }
       const validation = validateRefinementProposal(proposal, resolved.agent.name)
       if (validation.error) return { text: `refine rejected: ${validation.error}`, details: { kind: 'error', results: [] } }
-      const { path: overlayPath, revision } = await writeRefinement(projectRoot, resolved.agent.name, proposal)
+      const { path: overlayPath, revision } = await writeRefinement(projectRoot, resolved.agent.name, proposal, sha256Hex(resolved.agent.systemPrompt))
       return { text: `Wrote refinement overlay for ${resolved.agent.name} (revision ${revision}) at ${overlayPath}`, details: { kind: 'refine', results: [] } }
     }
     default:
@@ -197,4 +213,9 @@ function safeParseJson(text: string): Record<string, unknown> | undefined {
   } catch {
     return undefined
   }
+}
+
+/** base prompt 的 sha256（refine 漂移检测用）。 */
+function sha256Hex(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
 }

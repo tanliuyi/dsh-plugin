@@ -8,9 +8,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ChildRecord, RetainedChild, RunRecord } from '../types.ts'
+import { DEFAULT_FOREGROUND_TIMEOUT_MS } from '../types.ts'
 import type { RunStore } from './store.ts'
 import type { SpawnDeps } from './spawn.ts'
-import { spawnChild } from './spawn.ts'
+import { readLatestAssistantOutput, spawnChild } from './spawn.ts'
 import type { AgentConfig } from '../types.ts'
 
 /** 运行控制动作的依赖（在 SpawnDeps 基础上需要 ctx）。 */
@@ -85,14 +86,60 @@ export function steerRun(
   return { text: `steered child ${target.index} of run ${id}`, ok: true, deliveryStatus: 'delivered' }
 }
 
-/** resume：以先前输出为上下文的 fallback 挑战（新子代理）。 */
+/** resume：优先续跑原 child 会话（对齐上游 retained-resume：保留中断回合的完整
+ *  会话状态，经 subagents.followup 唤醒）；child 会话不可用（已 dispose/超时）
+ *  时回退为带先前输出的 fallback challenge（新子代理）。 */
 export async function resumeChild(
   deps: ControlDeps,
   retained: RetainedChild,
   message: string,
   params: { signal: AbortSignal; parent: Parameters<typeof spawnChild>[1]['parent'] },
 ): Promise<{ text: string; ok: boolean; runId?: string }> {
-  const { registry } = deps
+  const { ctx, registry } = deps
+  const timeoutMs = deps.config.timeoutMs ?? DEFAULT_FOREGROUND_TIMEOUT_MS
+  const childSessionId = retained.runId
+
+  // 1) 真续跑：child 会话仍在 agents 注册表中
+  if (childSessionId) {
+    const childAgent = ctx.get('agents')?.get(childSessionId as never)
+    const subagents = ctx.get('subagents')
+    if (childAgent && subagents) {
+      const previous = readLatestAssistantOutput(ctx, childSessionId)
+      const resumeText = [
+        `Resume from your previous attempt${retained.reason ? ` (${retained.reason})` : ''}.`,
+        '',
+        `Previous task:\n${retained.task}`,
+        '',
+        previous ? `Your previous result ended with:\n${previous.slice(0, 4000)}\n` : '',
+        `Follow-up from the parent: ${message}`,
+      ].filter(Boolean).join('\n')
+      try {
+        await subagents.followup(params.parent, childSessionId as never, [{ type: 'text', text: resumeText }], {
+          source: { kind: 'plugin', plugin: 'dsh-subagents' },
+          signal: params.signal,
+        })
+        const outcome = await waitForResumeOutput(ctx, childAgent, previous, timeoutMs, params.signal)
+        if (outcome.status === 'completed' && outcome.output) {
+          const run = deps.store.createRun({ mode: 'single', agent: retained.agent, missionId: retained.missionId })
+          deps.store.finishRun(run.id, 'completed', { goal: `resume ${retained.agent}` })
+          deps.store.appendEvent(run.id, { type: 'subagent.run.resumed', runId: childSessionId, retainedKey: retained.key ?? null })
+          return {
+            text: `resumed ${retained.agent} (continued the original child session)\n${outcome.output.slice(0, 4000)}`,
+            ok: true,
+            runId: run.id,
+          }
+        }
+        if (outcome.status === 'aborted') {
+          return { text: `resume of ${retained.agent} was aborted`, ok: false }
+        }
+      } catch (error) {
+        // followup 失败 → 回退 fallback challenge
+        // （错误记录到 run 事件流需要 run id；此处保留 fallback 语义即可）
+      }
+    }
+  }
+
+  // 2) fallback challenge（新子代理，带先前输出）
   const resolved = await registry.resolve(retained.agent, 'both', deps.projectRoot)
   if (!resolved.agent) return { text: `cannot resume ${retained.agent}: ${resolved.error}`, ok: false }
   const agent: AgentConfig = resolved.agent
@@ -123,6 +170,32 @@ export async function resumeChild(
     text: `resumed ${retained.agent} (fallback challenge: previous attempt was ${retained.reason ?? 'completed'})\n${child.output.slice(0, 4000)}`,
     ok: child.child.status === 'completed',
     runId: run.id,
+  }
+}
+
+/**
+ * 等待续跑回合完成：child 从 running 回到 idle 且出现新输出即完成；
+ * 超时返回 timeout，信号中止返回 aborted。
+ */
+async function waitForResumeOutput(
+  ctx: Context,
+  childAgent: import('@deepseek-ai/dsh-agent').Agent,
+  prevOutput: string | undefined,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<{ output?: string; status: 'completed' | 'timeout' | 'aborted' }> {
+  const deadline = Date.now() + timeoutMs
+  let sawRunning = false
+  for (;;) {
+    if (signal.aborted) return { status: 'aborted' }
+    if (Date.now() > deadline) return { status: 'timeout' }
+    const status = childAgent.status
+    if (status === 'running') sawRunning = true
+    const output = readLatestAssistantOutput(ctx, childAgent.session.id)
+    if (sawRunning && status === 'idle' && output && output !== prevOutput) {
+      return { output, status: 'completed' }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200))
   }
 }
 

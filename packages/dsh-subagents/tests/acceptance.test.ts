@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  checkNoStagedFiles,
   computeEvidenceStatus,
   gateToAcceptance,
   inferAcceptance,
@@ -90,4 +91,36 @@ test('computeEvidenceStatus transitions', () => {
   assert.equal(missing, 'rejected')
   const verified = computeEvidenceStatus({ level: 'verified', criteria: [], evidence: [], verify: [] }, report, [{ passed: true, output: 'ok' }], {})
   assert.equal(verified, 'verified')
+})
+
+test('inferAcceptance: explicit verified without verify commands is rejected（对齐上游 verified 强制 ≥1 verify）', () => {
+  assert.throws(() => inferAcceptance({ ...params, acceptance: 'verified' }, workerAgent(), false), /verified.*requires at least one verify/)
+  assert.throws(() => inferAcceptance({ ...params, acceptance: { level: 'verified' } }, workerAgent(), false), /verified.*requires at least one verify/)
+  // 带 verify 数组的显式 verified 通过
+  const ok = inferAcceptance({ ...params, acceptance: { level: 'verified', verify: [{ command: 'npm test' }] } }, workerAgent(), false)
+  assert.equal(ok.spec.level, 'verified')
+  assert.equal(ok.spec.verify.length, 1)
+})
+
+test('checkNoStagedFiles: 真实 git 暂存区检查（对齐上游）', async () => {
+  const { execFileSync } = await import('node:child_process')
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const { tmpdir } = await import('node:os')
+  const dir = mkdtempSync(join(tmpdir(), 'dshsub-nsf-'))
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir })
+    execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir })
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: dir })
+    writeFileSync(join(dir, 'a.txt'), 'x')
+    // 未跟踪文件不算 staged
+    assert.equal(checkNoStagedFiles(dir).passed, true)
+    // staged 文件 → 失败
+    execFileSync('git', ['add', 'a.txt'], { cwd: dir })
+    assert.equal(checkNoStagedFiles(dir).passed, false)
+    execFileSync('git', ['commit', '-qm', 'init'], { cwd: dir })
+    assert.equal(checkNoStagedFiles(dir).passed, true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

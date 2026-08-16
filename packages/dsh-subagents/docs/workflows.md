@@ -17,7 +17,9 @@ subagents({ workflowScript: `
 ` });
 ```
 
-- `runs.run(key, { agent, task, context?, gate?, acceptance? })` — one child; `runs.all([...])` runs a wave in parallel.
+- `runs.run(key, { agent, task, context?, gate?, acceptance? })` — one child; `runs.all([...])` runs a wave in parallel. Keys are validated (1–128 chars, `[A-Za-z0-9._-]`); the same key may not be launched twice with incompatible params (fingerprint check, like upstream).
+- `runs.status(keyOrRunId)` — the result of an already launched run (by key or run id), or `undefined`.
+- `runs.ref(result)` / `runs.refs(results)` — compact run references (`[run <key>; id=<runId8>]`), usable in status queries and logs.
 - `await state.get(key)` / `state.set(key, value)` — durable JSON state through the enclosing mission (256 KiB cap).
 - `await prompts.render("package:<name>" | "user:<name>" | "project:<name>", vars?)` — renders a prompt template with `{{var}}` placeholders.
 - Workflows run in the background by default (`async: true`); pass `async: false` for a foreground run.

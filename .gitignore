@@ -10,3 +10,8 @@ dist/
 *.log
 .DS_Store
 *.tgz
+.pnpm-store/
+.npm-cache/
+
+# vendored fork ships a prebuilt client bundle (dsh skin) — keep lib/ tracked
+!packages/dsh-client-ui-skin-claude/lib/

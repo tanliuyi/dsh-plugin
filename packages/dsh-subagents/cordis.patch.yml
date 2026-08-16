@@ -1,5 +1,14 @@
 # 本包贡献的配置层：把 dsh-subagents 插件插入到组合中。
 # 插件行按包名引用（Node 解析会找到 profile 里安装的代码）。
+
+# 禁用 dsh-base 原生注册的 tool-subagent-report（id/name 对齐 dsh-base 行）：
+# 本插件的 report 工具（src/report.ts，经 registerContinuableSetup 注入每个
+# continuable 子作用域）是它的插件级替代，投递策略按父回合状态动态选择。
+# 必须在插入本插件行之前禁用，避免重复注册同名的子作用域 report 工具。
+- id: tool-subagent-report
+  name: '@deepseek-ai/dsh-tool-subagent-report'
+  disabled: true
+
 - insert:
     - id: subagents
       name: '@dsh-plugins/dsh-subagents'

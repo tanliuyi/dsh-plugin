@@ -14,6 +14,7 @@
     "docs:sync": "node scripts/sync-docs.mjs",
     "docs:check": "node scripts/sync-docs.mjs --check",
     "docs:upstream": "node scripts/sync-upstream.mjs",
-    "docs:upstream:check": "node scripts/sync-upstream.mjs --check"
+    "docs:upstream:check": "node scripts/sync-upstream.mjs --check",
+    "patch:web-settings-icon": "node scripts/patch-web-settings-icon.mjs"
   }
 }

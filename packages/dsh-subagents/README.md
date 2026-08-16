@@ -40,6 +40,12 @@ Run parallel reviewers: one for correctness, one for tests, and one for unnecess
 
 > 工具名用 **`subagents`**（复数）：dsh 的 standard agent preset 已注册原生的 `subagent` / `subagent_fork` 工具，名称冲突时同一层注册会抛错。原生 `subagent` 工具保留原始委派；本插件的 `subagents` 工具提供 pi 风格的 agent 目录、动作面、missions、schedules 与 watchdog。
 
+## Minimal 预设
+
+DSH 的 `minimal` 预设承诺只向模型提供持久 `bash` 与 `str_replace_editor`。本插件虽然挂载在 host plane，但会在 live minimal agent 的 scope 中移除 `subagents`、`contact_supervisor`、`subagents_supervisor` 与 `subagents_wait`；空白会话在首次回合前切换 preset 时会同步安装或撤销限制。missions、schedules、Web 设置等 host 服务仍常驻，不进入 minimal 的模型工具面。
+
+DSH 当前的 command/skill registry 是 host-global，尚无 preset-scoped 可见性 API，因此 slash command 和 skill 名称仍可能出现在 UI 清单中；这不使对应模型工具在 minimal 中可用。
+
 ## 内置 agents
 
 | Agent | 用途 |
@@ -123,6 +129,16 @@ subagents({ action: "grant-spawn-budget", additional: 10 })
 
 子代理被阻塞或需要决策时调用 `contact_supervisor`（`reason: "need_decision" | "interview_request" | "progress_update"`）；父会话用 `subagents_supervisor`（`{ action: "reply", replyTo, message }` 或 `{ action: "pending" }`）查看/回复。请求按精确父会话隔离。
 
+### 子代理反向回报（continuable 子代理的 `report` 工具）
+
+本插件为每个 continuable 子代理注入反向回报通道：子代理用 `report` 工具把结果
+/进展发回启动它的父会话（子作用域注册、schema、guidance、output 与 source 行为对齐
+dsh 官方 tool-subagent-report，作为其插件级替代）。投递按直接父会话回合状态动态选择：
+父回合开着 → `quiet`（回合内注入，不排队）；父已停靠 → `wakeup`（唤醒一个新回合）。
+父会话回合状态在插件 apply/热重载时从各存活会话的事件日志折叠重建（最近 `turn/start`
+即判为进行中），故重载瞬间已有开回合的父会话不会被误判为停靠。
+配装时 `cordis.patch.yml` 会禁用它替换的原生 `tool-subagent-report` 行。
+
 ### Watchdog（可选对抗性评审）
 
 `subagents({ action: "watchdog.configure", model: "recommended" })` 或 `/subagents-watchdog on` 开启。在每个回合边界，若 agent 改变了仓库状态，用配置的强模型评审 diff；阻断项作为可见消息送达，`autoFollow` 可自动排队修复指令。范围监控（scope drift）与每 N 次工具调用的 cadence 评审可选。
@@ -172,6 +188,17 @@ subagents({ action: "grant-spawn-budget", additional: 10 })
 
 模型 id 使用 pi 风格（`provider/model[:thinking]`，如 `anthropic/claude-sonnet-4:high`），按 dsh 注册的 adapter 目录模糊解析；未解析的模型回退为继承父会话模型。
 
+## Web 设置页（Web UI）
+
+在 dsh Web UI 中，本插件注册「设置 → Subagents」分区（client 插件：`package.json` 的 `dsh` 对象下声明 `client` 字段，即 `dsh.client`，并提供 `exports["./client"]`），可在浏览器里编辑上述常用键，无需手写 `cordis.patch.yml`。
+
+- **传输**：浏览器端表单经同源路由 `/api/subagents/settings`（GET/PUT/DELETE）读写覆盖文件 `~/.dsh/subagents/web-settings.json`。该路由挂在 webServer 上（exact 路由，优先于 api-proxy 的 `/api` 前缀），自带回环信任校验（实际 TCP 对端与 Host 必须是回环地址；写请求必须携带同源 Origin——CSRF 关键约束；拒绝 cross-site 请求）。
+- **为什么不用 Host settings API**：dsh 的 settings RPC 命名空间是 api-proxy 白名单（`WEB_SETTINGS_NAMESPACES`），第三方插件命名空间只会得到 `settings-not-exposed`，因此本插件自带传输。
+- **生效方式**：除 `missions.enabled` 与 `scheduledRuns.enabled`（apply 期固定结构，标「重启后生效」）外，保存即 live-apply——消费点（spawn、watchdog、budgets 等）在调用时读取 `deps.config`，下一次工具调用即生效。
+- **文件即覆盖层**：web-settings.json 只存与 cordis 配置（baseline）不同的键；「恢复全部默认」会清空文件并把内存配置复位。文件损坏时按空覆盖处理，不影响插件启动。
+- **限制**：非回环（LAN）部署暂不支持该设置页（信任校验只认回环，fail-closed）；经反向代理暴露时代理必须保留原始回环 Host 头才会被接受，**不应**把该路由代理给不可信来源（如确需经代理访问，代理自身必须加认证/访问控制，且仍无法通过信任校验——本设置页只设计给本机浏览器）；设置页只覆盖上述常用键，`agentOverrides`、`permissions.rules` 等复杂结构请继续用配置文件。
+- **零配置（dsh rc.6）**：client bundle 扫描器（dsh-client-modules）经 loader 的 `baseUrl`（profile 目录）解析包清单，因此 profile 安装的包只要导出 `./package.json` 就会被原生发现，无需任何环境变量（实测 client bundle 200 + 启动清单含本包）。本插件另在 apply 时自注册 `clientModules` 表行作为兜底，未来 dsh 版本若调整扫描机制仍可工作。
+
 ## Agent 自定义
 
 Agent 是带 YAML frontmatter 的 markdown 文件，按优先级 project > user > builtin：
@@ -216,7 +243,8 @@ pnpm test    # node:test + tsx（102 个用例）
 ## 与 pi-subagents 的差异（dsh 移植说明）
 
 - 工具名 `subagents`（原生 `subagent` 名称已被 dsh preset 占用）。
-- 子代理是 dsh 进程内原生 child（`ctx.subagents.start`），不是 `pi` CLI 子进程；`resume` 以先前输出为上下文的 fallback challenge 新启动，而非恢复原会话文件。
-- `toolTimeoutMs`/`turnBudget`/`toolBudget`/`usageBudget` 接受但不在子代理内强制；`share`、`worktree`、chains、Herdr/Orca 集成、LSP 预检、外部 CLI profiles 未移植（见 [docs/tool-reference.md](docs/tool-reference.md) 与 [docs/workflows.md](docs/workflows.md)）。
-- 模型/thinking 解析为 dsh adapter 目录的模糊匹配；`fallbackModels` 记录但不驱动回退（dsh 自身拥有 provider 重试策略）。
-- 其余行为对齐 pi-subagents v0.49：agents frontmatter、验收门（acceptance/gate）、预算、missions（含 goal 驱动与 state）、schedules、supervisor 通道、watchdog（范围监控/autoFollow/cadence）、refine 覆盖层、slash 命令。
+- 子代理是 dsh 进程内原生 child（`ctx.subagents.start`），不是 `pi` CLI 子进程；`resume` 优先续跑原 child 会话（`subagents.followup`，保留中断回合的完整状态），child 不可用时回退为带先前输出的 fallback challenge。
+- 预算语义（与上游的差异如实声明）：上游在子代理内硬强制 `toolTimeoutMs`（per-tool 定时器）、`turnBudget`（回合数硬中止）与链级 `usageBudget`（workflow 跨子代理费用门）；dsh 侧 `turnBudget` 已移植（persona 注入软预算 + 全局 turn/start 事件计数，soft 到达 maxTurns 时 steer 请求 wrap-up、超过 maxTurns+graceTurns 时 cancel 中止，对齐上游 turn-budget.ts）；`toolBudget` 已移植计数与 soft/hard 提示（soft nudge、hard 后 block 工具 steer 告知禁止；dsh 无 per-tool 拦截，无法真正阻止调用）；`toolTimeoutMs` 已移植 per-tool 计时中止（超时 cancel；wait 类工具豁免；仅显式配置生效，上游默认 fast-tool 超时未采用——dsh-agent 自身管理工具执行）；链级 `usageBudget.tokens.hard` 门已实现（tokenMeter 启发式估算；`costUsd` 记录不执行）；`completionGuard` 已移植（task-intent 纯函数 + 全局 tool/call 事件观察写工具，替代上游消息流检测；实现类任务完成但从未编辑 → 失败）；`structuredOutputSchema` 已接线（透传 dsh 平台原生 outputSchema，结果在 result.structured/structuredOutput）；`permissions.rules.deny` 已接线（→ toolFilter.deny 排除；`ask` 无 per-tool 审批钩子不执行）；`share`、`worktree`、chains、Herdr/Orca 集成、外部 CLI profiles 未移植（见 [docs/tool-reference.md](docs/tool-reference.md) 与 [docs/workflows.md](docs/workflows.md)）。watchdog 的 LSP 预检已移植（自包含 typescript-language-server 子进程），见 [docs/watchdog.md](docs/watchdog.md)。
+- 模型/thinking 解析为 dsh adapter 目录的匹配；`fallbackModels` 已接线驱动重试（primary + fallbacks 候选列表，可重试模型失败——rate limit/模型不可用/网络——时换下一个候选重跑任务，对齐上游 model-fallback.ts）。watchdog 评审模型按上游语义严格解析到已注册 provider + 已发现模型（见 [docs/watchdog.md](docs/watchdog.md)）。
+- 其余行为对齐 pi-subagents（HEAD 47552b5）：agents frontmatter、验收门（acceptance/gate，推断语义经 task-intent 对齐上游 inferLevel）、预算（turn-budget/tool-budget/tool-timeout 运行期强制，见上）、missions（含 goal 驱动与 state，mission.update/attach-run/close 支持上游 missionUpdate/missionStatus/runMode/runStatus 参数面）、schedules（含 catchUp）、supervisor 通道、**watchdog 完整移植**（agent_end 边界评审、turn-delta 评审输入、只读评审 agent + 结构化警告 + emission guard、多层 settings、child 独立 runtime、cadence steer、auto-follow、LSP 预检、session override 与完整命令面，见 [docs/watchdog.md](docs/watchdog.md)）、refine 覆盖层、slash 命令、debug.run 生命周期诊断、workflow 沙箱（禁用 codeGeneration、emit、JSON 断言）。
+- 未移植（dsh 平台无对应能力，如实记录）：`worktree`（child 无独立 cwd）、`chains`（append-step/approve-checkpoint/reject-checkpoint 依赖上游 durable chain 架构）、`inspector.*`/`project.*`（Herdr 桌面集成）、`worktree.discard`、`steeringRecovery`（依赖进程恢复描述符）、resume 的持久化契约恢复（进程重启后保留 child 需重新 launch）、MCP direct tools（dsh 无 MCP 服务器面）、`share`（无 Gist）、`permissions.ask`（无 per-tool 交互审批）、`costUsd`（无费用数据）、`chatProgress`（无 live-card 投影）。

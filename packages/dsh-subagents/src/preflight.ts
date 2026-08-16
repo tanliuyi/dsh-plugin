@@ -101,7 +101,7 @@ function defaultConfig(): import('./types.ts').SubagentsConfig {
     missions: { enabled: true, retainTerminal: 200, globalIndex: true },
     scheduledRuns: { enabled: true, maxPending: 20 },
     intercomBridge: { mode: 'always', resultDelivery: false },
-    watchdog: { enabled: false, main: {}, children: { overrides: {} }, scope: { enabled: false }, cadence: {}, autoFollow: { blockers: false, maxAttempts: 3, stalemateRepeats: 3 } },
+    watchdog: { enabled: false, main: {}, children: { enabled: false, overrides: {} }, scope: { enabled: true }, cadence: {}, autoFollow: { blockers: true, maxAttempts: 3, stalemateRepeats: 3 } },
     permissions: { rules: {} },
     artifactDir: 'temp',
     forceTopLevelAsync: false,

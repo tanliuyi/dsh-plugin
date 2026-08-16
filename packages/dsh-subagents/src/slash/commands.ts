@@ -152,46 +152,11 @@ export function registerSlashCommands(ctx: Context, deps: SubagentsDeps, session
     return { kind: 'success', text: result.text }
   }, { hint: '<agent> [propose]' })
 
-  register('subagents-watchdog', 'Watchdog control: /subagents-watchdog [on|off|status|model <id>|recommend-model|check]', async (invocation) => {
-    const raw = invocation.rawInput.trim()
-    const [verb, ...rest] = raw.split(/\s+/)
-    switch (verb) {
-      case 'on': {
-        const { saveWatchdogFile, loadWatchdogFile } = await import('../watchdog/actions.ts')
-        const file = await loadWatchdogFile(deps.home)
-        file.enabled = true
-        await saveWatchdogFile(deps.home, file)
-        return { kind: 'success', text: 'Watchdog enabled (reviews repo edits at turn boundaries).' }
-      }
-      case 'off': {
-        const { saveWatchdogFile, loadWatchdogFile } = await import('../watchdog/actions.ts')
-        const file = await loadWatchdogFile(deps.home)
-        file.enabled = false
-        await saveWatchdogFile(deps.home, file)
-        return { kind: 'success', text: 'Watchdog disabled.' }
-      }
-      case 'model': {
-        const { saveWatchdogFile, loadWatchdogFile } = await import('../watchdog/actions.ts')
-        const file = await loadWatchdogFile(deps.home)
-        file.main = { ...file.main, model: rest.join(' ') || undefined }
-        await saveWatchdogFile(deps.home, file)
-        return { kind: 'success', text: `Watchdog model set to ${rest.join(' ') || '(inherit session model)'}.` }
-      }
-      case 'recommend-model': {
-        return { kind: 'success', text: 'Recommended watchdog pairing: anthropic/claude-opus-4-8:high (or openai-codex/gpt-5.5:high when the main session uses Anthropic).' }
-      }
-      case 'check':
-      case 'status': {
-        const result = await executeSubagents(deps, sessionState, {
-          parent: invocation.agent,
-          signal: invocation.signal,
-          cwd: invocation.agent.session.header.cwd ?? process.cwd(),
-        }, { action: 'watchdog.status' })
-        return { kind: 'success', text: result.text }
-      }
-      default:
-        return { kind: 'error', text: 'Usage: /subagents-watchdog [on|off|status|model <id>|recommend-model|check]' }
-    }
+  register('subagents-watchdog', 'Watchdog control: /subagents-watchdog [on|off|status|session on|session off|model <id>|thinking <level>|session model <id>|recommend-model|check|test concern|blocker <text>]', async (invocation) => {
+    // 完整命令面由 watchdog 控制面处理（对齐上游 register-main 命令面）
+    const watchdog = deps.watchdog
+    if (!watchdog) return { kind: 'error', text: 'Subagent watchdog is unavailable in this deployment.' }
+    return watchdog.handleCommand(invocation)
   }, { hint: '[on|off|status|model <id>|recommend-model|check]' })
 
   return () => {

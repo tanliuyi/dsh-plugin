@@ -4,6 +4,7 @@
  */
 
 import Schema from '@deepseek-ai/schemastery'
+import { normalizeCeiling, type SubagentCapabilityCeiling } from './runs/capability-ceiling.ts'
 
 export interface Config {
   toolDescriptionMode?: 'full' | 'compact' | 'custom'
@@ -28,6 +29,12 @@ export interface Config {
   artifactDir?: 'project' | 'session' | 'temp'
   forceTopLevelAsync?: boolean
   waitTool?: { enabled?: boolean }
+  /** 能力上限（对齐上游 capability-ceiling）：受限工具被移除、受限 agent 被拒绝。 */
+  capabilityCeiling?: {
+    allowedTools?: string[]
+    allowedAgents?: string[]
+    denyExtensions?: boolean
+  }
 }
 
 export interface AgentOverrideConfig {
@@ -48,11 +55,31 @@ export interface AgentOverrideConfig {
 
 export interface WatchdogConfig {
   enabled?: boolean
+  delivery?: 'held'
+  showDuringRun?: boolean
+  syncBacklog?: 'off' | number
+  agentEndTimeoutMs?: number
+  lateWarningPolicy?: 'show-stale-no-autofollow'
+  severityThreshold?: 'concern' | 'blocker'
+  maxWarnings?: number | null
+  guidance?: { watchdogMd?: boolean; systemPromptPath?: string | null }
   main?: { model?: string; thinking?: string | false }
-  children?: { model?: string; overrides?: Record<string, { model?: string; thinking?: string | false }> }
+  children?: {
+    enabled?: boolean
+    model?: string
+    thinking?: string | false
+    watchdogTailTimeoutMs?: number
+    autoFollow?: { blockers?: boolean; maxAttempts?: number | null; stalemateRepeats?: number }
+    overrides?: Record<string, { enabled?: boolean; model?: string; thinking?: string | false }>
+  }
   scope?: { enabled?: boolean }
-  cadence?: { everyNTools?: number }
+  cadence?: { everyNTools?: number | null }
   autoFollow?: { blockers?: boolean; maxAttempts?: number; stalemateRepeats?: number }
+  asyncCompletion?: { enabled?: boolean; autoFollowBlockers?: boolean }
+  lsp?: { enabled?: boolean; timeoutMs?: number; maxFiles?: number; maxDiagnostics?: number }
+  compactAtPercent?: number
+  reviewRetryDelayMs?: number
+  maxReviewFailures?: number
 }
 
 const AgentOverrideSchema = Schema.object({
@@ -72,31 +99,62 @@ const AgentOverrideSchema = Schema.object({
 })
 
 const WatchdogChildOverrideSchema = Schema.object({
+  enabled: Schema.boolean(),
   model: Schema.string(),
   thinking: Schema.union([Schema.string(), Schema.const(false)]),
 })
 
+const WatchdogAutoFollowSchema = Schema.object({
+  blockers: Schema.boolean(),
+  maxAttempts: Schema.union([Schema.natural(), Schema.const(null)]),
+  stalemateRepeats: Schema.natural(),
+})
+
 const WatchdogSchema = Schema.object({
-  enabled: Schema.boolean().default(false),
+  enabled: Schema.boolean(),
+  delivery: Schema.const('held'),
+  showDuringRun: Schema.boolean(),
+  syncBacklog: Schema.union([Schema.const('off'), Schema.natural()]),
+  agentEndTimeoutMs: Schema.natural(),
+  lateWarningPolicy: Schema.const('show-stale-no-autofollow'),
+  severityThreshold: Schema.union([Schema.const('concern'), Schema.const('blocker')]),
+  maxWarnings: Schema.union([Schema.natural(), Schema.const(null)]),
+  guidance: Schema.object({
+    watchdogMd: Schema.boolean(),
+    systemPromptPath: Schema.union([Schema.string(), Schema.const(null)]),
+  }),
   main: Schema.object({
     model: Schema.string(),
     thinking: Schema.union([Schema.string(), Schema.const(false)]),
   }),
   children: Schema.object({
+    enabled: Schema.boolean(),
     model: Schema.string(),
+    thinking: Schema.union([Schema.string(), Schema.const(false)]),
+    watchdogTailTimeoutMs: Schema.natural(),
+    autoFollow: WatchdogAutoFollowSchema,
     overrides: Schema.dict(WatchdogChildOverrideSchema),
   }),
   scope: Schema.object({
-    enabled: Schema.boolean().default(false),
+    enabled: Schema.boolean(),
   }),
   cadence: Schema.object({
-    everyNTools: Schema.natural(),
+    everyNTools: Schema.union([Schema.natural(), Schema.const(null)]),
   }),
-  autoFollow: Schema.object({
-    blockers: Schema.boolean().default(false),
-    maxAttempts: Schema.natural().default(3),
-    stalemateRepeats: Schema.natural().default(3),
+  autoFollow: WatchdogAutoFollowSchema,
+  asyncCompletion: Schema.object({
+    enabled: Schema.boolean(),
+    autoFollowBlockers: Schema.boolean(),
   }),
+  lsp: Schema.object({
+    enabled: Schema.boolean(),
+    timeoutMs: Schema.natural(),
+    maxFiles: Schema.natural(),
+    maxDiagnostics: Schema.natural(),
+  }),
+  compactAtPercent: Schema.natural(),
+  reviewRetryDelayMs: Schema.natural(),
+  maxReviewFailures: Schema.natural(),
 })
 
 /**
@@ -145,6 +203,13 @@ export const Config: Schema<Config> = Schema.object({
   waitTool: Schema.object({
     enabled: Schema.boolean().default(true),
   }),
+  capabilityCeiling: Schema.object({
+    // Schemastery arrays default to []; preserve absence so an omitted sibling
+    // does not become an accidental deny-all allowlist.
+    allowedTools: Schema.array(Schema.string()).default(undefined as never),
+    allowedAgents: Schema.array(Schema.string()).default(undefined as never),
+    denyExtensions: Schema.boolean(),
+  }),
 }) as Schema<Config>
 
 /** 把（已校验的）配置规范为运行时 SubagentsConfig。 */
@@ -156,6 +221,10 @@ export function normalizeConfig(raw: Config): import('./types.ts').SubagentsConf
   const intercomBridge = raw.intercomBridge ?? {}
   const permissions = raw.permissions ?? {}
   const waitTool = raw.waitTool ?? {}
+  const rawCeiling = raw.capabilityCeiling
+  const capabilityCeiling = rawCeiling && Object.keys(rawCeiling).length > 0
+    ? normalizeCeiling(rawCeiling as SubagentCapabilityCeiling)
+    : undefined
   return {
     toolDescriptionMode: raw.toolDescriptionMode ?? 'compact',
     asyncByDefault: raw.asyncByDefault ?? true,
@@ -189,15 +258,37 @@ export function normalizeConfig(raw: Config): import('./types.ts').SubagentsConf
     },
     watchdog: {
       enabled: watchdog.enabled ?? false,
+      delivery: watchdog.delivery,
+      showDuringRun: watchdog.showDuringRun,
+      syncBacklog: watchdog.syncBacklog,
+      agentEndTimeoutMs: watchdog.agentEndTimeoutMs,
+      lateWarningPolicy: watchdog.lateWarningPolicy,
+      severityThreshold: watchdog.severityThreshold,
+      maxWarnings: watchdog.maxWarnings,
+      guidance: watchdog.guidance,
       main: watchdog.main ?? {},
-      children: { model: watchdog.children?.model, overrides: watchdog.children?.overrides ?? {} },
-      scope: { enabled: watchdog.scope?.enabled ?? false },
+      children: {
+        enabled: watchdog.children?.enabled,
+        model: watchdog.children?.model,
+        thinking: watchdog.children?.thinking,
+        watchdogTailTimeoutMs: watchdog.children?.watchdogTailTimeoutMs,
+        autoFollow: watchdog.children?.autoFollow,
+        overrides: watchdog.children?.overrides ?? {},
+      },
+      // scope 默认开（对齐上游 DEFAULT_WATCHDOG_CONFIG）
+      scope: { enabled: watchdog.scope?.enabled ?? true },
       cadence: watchdog.cadence ?? {},
-      autoFollow: { blockers: watchdog.autoFollow?.blockers ?? false, maxAttempts: watchdog.autoFollow?.maxAttempts ?? 3, stalemateRepeats: watchdog.autoFollow?.stalemateRepeats ?? 3 },
+      autoFollow: { blockers: watchdog.autoFollow?.blockers ?? true, maxAttempts: watchdog.autoFollow?.maxAttempts ?? 3, stalemateRepeats: watchdog.autoFollow?.stalemateRepeats ?? 3 },
+      asyncCompletion: watchdog.asyncCompletion,
+      lsp: watchdog.lsp,
+      compactAtPercent: watchdog.compactAtPercent,
+      reviewRetryDelayMs: watchdog.reviewRetryDelayMs,
+      maxReviewFailures: watchdog.maxReviewFailures,
     },
     permissions: { rules: permissions.rules ?? {} },
     artifactDir: raw.artifactDir ?? 'temp',
     forceTopLevelAsync: raw.forceTopLevelAsync ?? false,
     waitTool: { enabled: waitTool.enabled ?? true },
+    capabilityCeiling,
   }
 }

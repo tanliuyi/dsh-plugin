@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildPrompt, resolveAgentModelRoute, waitForSupervisorResolution } from '../src/runs/spawn.ts'
+import { buildPrompt, resolveAgentModelRoute, spawnChild, waitForSupervisorResolution } from '../src/runs/spawn.ts'
+import { RunTreeBudget, SessionBudgets } from '../src/runs/budgets.ts'
 import type { SubagentsConfig } from '../src/types.ts'
 
 const baseConfig: SubagentsConfig = {
@@ -135,4 +136,67 @@ test('waitForSupervisorResolution: settles disposed when the child is destroyed'
   )
   emit('agent/disposed', { agent: childAgent })
   assert.equal(await promise, 'disposed')
+})
+
+/** capability-ceiling 拒绝的 preflight 回归（缺陷 #N3）：
+ * 受限 agent 必须在 buildPersona / ctx.subagents.start 之前被拒绝——历史版本只
+ * set failure 仍继续 start，导致受限请求实际执行。 */
+test('spawnChild: capability-ceiling-denied agent never reaches ctx.subagents.start', async () => {
+  const deniedAgent = { name: 'worker', systemPrompt: '', scope: 'builtin' } as never
+  const config: SubagentsConfig = {
+    ...baseConfig,
+    capabilityCeiling: { version: 1, allowedAgents: ['allowed-agent-a'], denyExtensions: false, sources: ['test'] },
+  }
+
+  let startCalls = 0
+  const ctx = {
+    subagents: {
+      start: (_provider: string, _request: never) => {
+        startCalls += 1
+        throw new Error('ctx.subagents.start must not be called for a denied agent')
+      },
+    },
+  }
+  const events: Array<Record<string, unknown>> = []
+  const store = {
+    addChild: () => {},
+    appendEvent: (_runId: string, event: Record<string, unknown>) => { events.push(event) },
+    updateChild: () => {},
+    finishChild: () => {},
+    appendOutput: () => {},
+  } as never
+
+  const deps = {
+    ctx,
+    config,
+    registry: {} as never,
+    store,
+    budgets: new SessionBudgets(config),
+    runTree: new RunTreeBudget(64),
+    projectRoot: '.',
+    supervisor: { pending: () => [] } as never,
+  } as never
+
+  const run = { id: 'run-1', mode: 'single', state: 'running', agent: 'worker', cwd: '.', sessionId: 's', children: [], results: [], spawnCount: 0, usage: {}, active: true, startedAt: Date.now(), lastUpdate: Date.now() } as never
+  const parent = { options: { subagentDepth: 0 }, session: { header: { delegationDepth: 0 }, id: 'parent-1' } } as never
+
+  const options = {
+    agent: deniedAgent,
+    task: 'do denied work',
+    context: 'fresh',
+    parent,
+    params: {},
+    index: 0,
+    key: 'k',
+    run,
+    cwd: '.',
+    signal: new AbortController().signal,
+  } as never
+
+  await assert.rejects(
+    () => spawnChild(deps, options),
+    /Capability ceiling from test does not allow agent 'worker'/,
+  )
+  assert.equal(startCalls, 0, 'denied agent must never reach ctx.subagents.start')
+  assert.ok(events.some((e) => e.type === 'subagent.capability-ceiling-denied'), 'denial must be recorded as a run event')
 })

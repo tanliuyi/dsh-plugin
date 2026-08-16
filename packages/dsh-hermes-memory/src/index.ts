@@ -36,6 +36,10 @@ import { setupCorrectionDetector } from './handlers/correction-detector.ts'
 import { setupSessionFlush } from './handlers/flush.ts'
 import { registerCommands } from './handlers/commands.ts'
 import { registerPromptSections } from './context.ts'
+import { HERMES_GLOBAL_TOOLS, registerMinimalPresetIsolation, isMinimalSessionPreset } from './presets.ts'
+
+// 规范的全局模型面工具名数组（minimal 预设隔离据此驳回）与会话预设解析。
+export { HERMES_GLOBAL_TOOLS, isMinimalSessionPreset, MINIMAL_PRESET_ID, registerMinimalPresetIsolation, resolveSessionPreset } from './presets.ts'
 
 /** 插件名。 */
 export const name = 'dsh-hermes-memory'
@@ -53,7 +57,7 @@ export type Config = import('./config.ts').Config
  * @param ctx - 插件上下文
  * @param rawConfig - 插件配置
  */
-export async function apply(ctx: Context, rawConfig: Config): Promise<void> {
+export async function apply(ctx: Context, rawConfig: Config): Promise<void | (() => void)> {
   const config = normalizeConfig(rawConfig)
   const memoryDir = resolveMemoryRoot(config.memoryDir)
   const projectsRoot = resolveProjectsRoot(config.projectsMemoryDir)
@@ -108,12 +112,19 @@ export async function apply(ctx: Context, rawConfig: Config): Promise<void> {
   setupCorrectionDetector(ctx, runtime)
   setupSessionFlush(ctx, runtime)
 
+  // ── 最小预设隔离：minimal agent 只应看到其自身两个本地工具，移除 Hermes
+  // 全局注册的模型面工具（restrict 归属 agent.ctx，随 agent 卸载自动回收）。
+  const disposeMinimalPresetIsolation = registerMinimalPresetIsolation(ctx, HERMES_GLOBAL_TOOLS)
+
   // ── 命令 ──
   registerCommands(ctx, runtime)
 
-  // ── 会话开始：刷新磁盘状态 + 预热项目存储 ──
+  // ── 会话开始：刷新磁盘状态 + 预热项目存储（minimal 会话跳过）──
   ctx.on('agent/session-start', async (payload) => {
-    const cwd = payload.agent.session.header.cwd
+    const session = payload.agent.session
+    // minimal 预设下 Hermes 自动逐会话行为禁用（见 docs）：不预热、不算入索引。
+    if (isMinimalSessionPreset(session)) return
+    const cwd = session.header.cwd
     const project = runtime.projectStores.resolve(cwd)
     try {
       await runtime.store.loadFromDisk()
@@ -122,4 +133,7 @@ export async function apply(ctx: Context, rawConfig: Config): Promise<void> {
       // 尽力而为 — 不阻塞会话启动
     }
   })
+
+  // root listener 不归属插件 fiber，必须显式回收以保证 HMR 不累积。
+  return disposeMinimalPresetIsolation
 }

@@ -39,7 +39,12 @@ Parameters and actions for the `subagents` tool. Most users ask naturally or use
 | `workflowScript` | Sandboxed workflow body. |
 | `missionId` / `mission` | Mission attachment / override (`false` = ephemeral). |
 | `timeoutMs` / `maxRuntimeMs` | Run deadline (default 30 minutes). |
-| `toolTimeoutMs`, `turnBudget`, `toolBudget`, `usageBudget` | Accepted for schema compatibility; recorded per run when available, not enforced inside dsh children. |
+| `toolTimeoutMs` | Per-tool timeout in ms: a tool call still running past the limit aborts the child via cancel (wait-type tools exempt; explicit config only — upstream's default fast-tool timeout is not adopted). |
+| `toolBudget` | Tool-call counting + steer nudges: soft nudge at `soft`, blocked tools (default `read/grep/find/ls`) announced as forbidden past `hard`; dsh cannot hard-block a tool call. |
+| `turnBudget` | Enforced: persona soft-budget injection + global turn counting; steer wrap-up at `maxTurns`, abort past `maxTurns + graceTurns` (grace 1 by default). |
+| `usageBudget` | Chain-level `tokens.hard` gate for workflows (tokenMeter heuristic); `costUsd` recorded, not enforced. |
+| `completionGuard` | Enforced: implementation tasks that finish without any mutating tool call fail with "Subagent completed without making edits for an implementation task." (tool/call observation substitutes upstream message-flow detection). |
+| `structuredOutputSchema` | JSON Schema; child must finish with a schema-valid structured result (dsh native `outputSchema`); result available as `structuredOutput` in the result row. |
 | `acceptance` / `gate` | Evidence gates (below). |
 | `maxOutput` | `{ maxChars?, maxLines? }` output truncation (default 200 KB). |
 | `index` | Child index for status/steer/resume targeting. |
@@ -48,7 +53,8 @@ Parameters and actions for the `subagents` tool. Most users ask naturally or use
 | `mode` | `steer` \| `follow_up` \| `auto` for steer. |
 | `resume` | 已弃用：`id` 的别名（retained child id from `children.list`）。用 `id` 传参。 |
 | `at` / `every` | Schedule triggers. |
-| `scope` | `session` \| `user` \| `project` for `watchdog.configure`. |
+| `scope` | `session` \| `user` \| `project` for `watchdog.configure`（session = 不落盘会话覆盖；user/project = 写入对应 settings 文件）。 |
+| `target` | `main` \| `children` \| `child`（+ `agent`）for `watchdog.configure`。 |
 
 ## Actions
 
@@ -66,7 +72,7 @@ Parameters and actions for the `subagents` tool. Most users ask naturally or use
 
 ### Watchdog
 
-`watchdog.configure` (`model`: `recommended` | `inherit` | id, `thinking`, `scope`), `watchdog.recommend-model`, `watchdog.status`, `watchdog.check`.
+`watchdog.configure` (`model`: `recommended` | `inherit` | id, `thinking`, `scope`: `session` | `user` | `project`, `target`: `main` | `children` | `child` + `agent`), `watchdog.recommend-model`, `watchdog.status`, `watchdog.check` — 完整语义见 [watchdog.md](watchdog.md)。
 
 ## Acceptance gates
 

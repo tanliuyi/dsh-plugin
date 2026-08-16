@@ -246,7 +246,11 @@ export function refinementFile(projectRoot: string, agent: string): string {
   return path.join(refinementsDir(projectRoot), `${agent}.md`)
 }
 
-/** 校验 refine 提案：禁止覆盖安全/策略/工具/输出/验收/系统指令。 */
+/**
+ * 校验 refine 提案：禁止覆盖安全/策略/工具/输出/验收/系统指令。
+ * 规则 = dsh 关键词黑名单 + 上游 agent-refinements.ts 的结构化 blocked regex
+ * （覆盖 disable/ignore/bypass/skip/override + protected instruction 的组合变体）。
+ */
 export function validateRefinementProposal(proposal: string, agentName: string): { error?: string } {
   const lower = proposal.toLowerCase()
   const forbidden = [
@@ -258,6 +262,15 @@ export function validateRefinementProposal(proposal: string, agentName: string):
   for (const needle of forbidden) {
     if (lower.includes(needle)) return { error: `refinement proposal mentions a guarded topic ("${needle}") and was rejected` }
   }
+  // 上游结构化 blocked 模式：all agents / every agent / global /
+  // (disable|ignore|bypass|skip|override) + protected instruction /
+  // protected instruction 的变体组合
+  const protectedInstruction = '(?:acceptance|output|safety|policy|policies|tools?|developer|system)'
+  const blocked = new RegExp(
+    `\\b(all agents|every agent|global|(?:disable|ignore|bypass|skip|override)\\s+(?:the\\s+)?${protectedInstruction}(?:\\s+instructions?)?|${protectedInstruction}\\s+(?:instructions?|overrides?)|tool safety|review gates|rewrite base|base agent file|settings\\.json|agents/.*\\.md)\\b`,
+    'i',
+  )
+  if (blocked.test(proposal)) return { error: 'refinement proposal targets protected instructions (acceptance/output/safety/policy/tools/developer/system) and was rejected' }
   if (/^#+ *(all agents|base agent)/im.test(proposal)) return { error: 'refinement proposal targets all agents or base agent files' }
   if (proposal.includes('---')) return { error: 'refinement proposal must not contain frontmatter' }
   return {}
@@ -268,8 +281,18 @@ export async function readRefinement(projectRoot: string, agent: string): Promis
   return readTextFile(refinementFile(projectRoot, agent))
 }
 
-/** 写入 refine 覆盖层（旧版本先快照到 .rev-N）。 */
-export async function writeRefinement(projectRoot: string, agent: string, proposal: string): Promise<{ path: string; revision: number }> {
+/** 从覆盖层文件解析元数据（revision / basePromptSha256）。 */
+export function parseRefinementMeta(content: string): { revision?: number; basePromptSha256?: string } {
+  const rev = content.match(/^revision: (\d+)/m)
+  const sha = content.match(/^basePromptSha256: ([0-9a-f]{64})/m)
+  return {
+    ...(rev?.[1] ? { revision: Number(rev[1]) } : {}),
+    ...(sha?.[1] ? { basePromptSha256: sha[1] } : {}),
+  }
+}
+
+/** 写入 refine 覆盖层（旧版本先快照到 .rev-N；可选记录 base prompt 哈希供漂移检测）。 */
+export async function writeRefinement(projectRoot: string, agent: string, proposal: string, basePromptSha256?: string): Promise<{ path: string; revision: number }> {
   const dir = refinementsDir(projectRoot)
   const filePath = refinementFile(projectRoot, agent)
   const previous = await readTextFile(filePath)
@@ -280,7 +303,8 @@ export async function writeRefinement(projectRoot: string, agent: string, propos
   if (previous !== undefined) {
     await writeTextAtomic(`${filePath}.rev-${revision - 1}`, previous)
   }
-  await writeTextAtomic(filePath, `# Refinement overlay for \`${agent}\`\n\nrevision: ${revision}\n\n${proposal.trim()}\n`)
+  const meta = [`# Refinement overlay for \`${agent}\``, `revision: ${revision}`, ...(basePromptSha256 ? [`basePromptSha256: ${basePromptSha256}`] : [])].join('\n')
+  await writeTextAtomic(filePath, `${meta}\n\n${proposal.trim()}\n`)
   return { path: filePath, revision }
 }
 

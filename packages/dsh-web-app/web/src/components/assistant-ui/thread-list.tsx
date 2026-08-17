@@ -1,9 +1,22 @@
 "use client";
 
+import { deriveThreadListProjection } from "@/dsh/thread-list";
+import { useDsh } from "@/dsh/store";
+import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   AuiIf,
   ThreadListItemMorePrimitive,
@@ -14,16 +27,20 @@ import {
 } from "@assistant-ui/react";
 import {
   ArchiveIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  FolderIcon,
+  FolderOpenIcon,
   Loader2Icon,
   MoreHorizontalIcon,
   PencilIcon,
   PlusIcon,
   SearchIcon,
+  SlidersHorizontalIcon,
   TrashIcon,
 } from "lucide-react";
 import {
   forwardRef,
-  Fragment,
   useEffect,
   useMemo,
   useRef,
@@ -34,16 +51,89 @@ import {
 
 export const ThreadList: FC = () => {
   const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   const hasThreads = useAuiState((s) => s.threads.threadIds.length > 0);
 
   return (
     <ThreadListRoot>
-      <ThreadListNew />
-      {hasThreads && (
+      <div data-slot="aui_thread-list-toolbar" className="flex h-8 items-center justify-between px-2.5">
+        <h2 className="text-sm font-medium text-foreground">工作区</h2>
+        <div data-slot="aui_thread-list-toolbar-actions" className="flex items-center gap-0.5">
+          <TooltipIconButton
+            tooltip="Search threads"
+            type="button"
+            data-slot="aui_thread-list-search-toggle"
+            aria-label="Search threads"
+            aria-pressed={searchOpen}
+            className="size-7 text-muted-foreground"
+            onClick={() => {
+              setSearchOpen((open) => !open);
+              if (searchOpen) setSearch("");
+            }}
+          >
+            <SearchIcon className="size-4" />
+          </TooltipIconButton>
+          <ThreadListViewControls />
+          <TooltipIconButton
+            tooltip="Add workspace"
+            type="button"
+            data-slot="aui_thread-list-add-workspace"
+            aria-label="Add workspace"
+            className="size-7 text-muted-foreground"
+            onClick={() => void useDsh.getState().addWorkspace()}
+          >
+            <PlusIcon className="size-4" />
+          </TooltipIconButton>
+        </div>
+      </div>
+      {searchOpen && hasThreads && (
         <ThreadListSearch value={search} onValueChange={setSearch} />
       )}
-      <ThreadListItems searchQuery={hasThreads ? search : ""} />
+      <ThreadListItems searchQuery={searchOpen && hasThreads ? search : ""} />
     </ThreadListRoot>
+  );
+};
+
+const ThreadListViewControls: FC = () => {
+  const [open, setOpen] = useState(false);
+  const groupBy = useDsh((s) => s.threadListView.groupBy);
+  const orderBy = useDsh((s) => s.threadListView.orderBy);
+  const setGroupBy = useDsh((s) => s.setThreadListGroupBy);
+  const setOrderBy = useDsh((s) => s.setThreadListOrderBy);
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <TooltipIconButton
+          tooltip="Thread list filters"
+          type="button"
+          data-slot="aui_thread-list-filter-toggle"
+          aria-label="Thread list filters"
+          className="size-7 text-muted-foreground"
+        >
+          <SlidersHorizontalIcon className="size-4" />
+        </TooltipIconButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel>分组方式</DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={groupBy}
+          onValueChange={(value) => setGroupBy(value as typeof groupBy)}
+        >
+          <DropdownMenuRadioItem value="workspace">按工作区</DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="flat">列表</DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>排序方式</DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={orderBy}
+          onValueChange={(value) => setOrderBy(value as typeof orderBy)}
+        >
+          <DropdownMenuRadioItem value="manual">手动排序</DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="updated">最近更新</DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 };
 
@@ -82,7 +172,7 @@ export const ThreadListRoot: FC<
   return (
     <ThreadListPrimitive.Root
       data-slot="aui_thread-list-root"
-      className={cn("flex flex-col gap-0.5", className)}
+      className={cn("flex min-h-0 flex-1 flex-col gap-0.5 px-2", className)}
       {...props}
     />
   );
@@ -94,7 +184,7 @@ export const ThreadListItems: FC<
   return (
     <div
       data-slot="aui_thread-list-items"
-      className={cn("flex flex-col gap-0.5", className)}
+      className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain", className)}
       {...props}
     >
       <AuiIf condition={(s) => s.threads.isLoading}>
@@ -107,68 +197,82 @@ export const ThreadListItems: FC<
   );
 };
 
-const DAY_IN_MS = 86_400_000;
-
-const dateGroupLabel = (
-  date: Date | undefined,
-  startOfToday: number,
-): string => {
-  if (!date || date.getTime() >= startOfToday) return "Today";
-  if (date.getTime() >= startOfToday - DAY_IN_MS) return "Yesterday";
-  return "Earlier";
-};
-
-type ThreadListGroup = { label: string; indices: number[] };
-
 const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   searchQuery = "",
 }) => {
+  const sessions = useDsh((s) => s.sessions);
+  const workspaces = useDsh((s) => s.workspaces);
+  const archivedSessionIds = useDsh((s) => s.archivedSessionIds);
+  const view = useDsh((s) => s.threadListView);
+  const currentSessionId = useDsh((s) => s.currentSessionId);
+  const setGroupExpanded = useDsh((s) => s.setThreadListGroupExpanded);
+  const setNewSessionWorkspace = useDsh((s) => s.setNewSessionWorkspace);
   const threadIds = useAuiState((s) => s.threads.threadIds);
-  const threadItems = useAuiState((s) => s.threads.threadItems);
-
   const query = searchQuery.trim().toLowerCase();
 
-  const { filteredIndices, groups } = useMemo(() => {
-    const itemsById = new Map(threadItems.map((item) => [item.id, item]));
-    const dates = threadIds.map((id) => itemsById.get(id)?.lastMessageAt);
-    const filteredIndices = threadIds
-      .map((id, index) => ({ id, index }))
-      .filter(
-        ({ id }) =>
-          !query ||
-          (itemsById.get(id)?.title || "New Chat")
-            .toLowerCase()
-            .includes(query),
-      )
-      .map(({ index }) => index);
-    if (!filteredIndices.some((index) => dates[index])) {
-      return { filteredIndices, groups: null };
+  const projection = useMemo(
+    () =>
+      deriveThreadListProjection(
+        sessions,
+        workspaces,
+        archivedSessionIds,
+        view,
+      ),
+    [sessions, workspaces, archivedSessionIds, view],
+  );
+  const indexById = useMemo(
+    () => new Map(threadIds.map((id, index) => [id, index])),
+    [threadIds],
+  );
+  const labelById = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const group of projection.groups) {
+      for (const id of group.sessionIds) labels.set(id, group.label);
     }
+    return labels;
+  }, [projection.groups]);
+  const filteredIds = useMemo(() => {
+    if (!query) return projection.sessions.map((session) => session.sessionId);
+    return projection.sessions
+      .filter((session) => {
+        const title = session.title || "New Chat";
+        return (
+          title.toLowerCase().includes(query) ||
+          labelById.get(session.sessionId)?.toLowerCase().includes(query)
+        );
+      })
+      .map((session) => session.sessionId);
+  }, [projection.sessions, query, labelById]);
 
-    const now = new Date();
-    const startOfToday = new Date(
-      now.getFullYear(),
-      now.getMonth(),
-      now.getDate(),
-    ).getTime();
-    const time = (index: number) =>
-      dates[index]?.getTime() ?? Number.MAX_SAFE_INTEGER;
-    const sorted = [...filteredIndices].sort((a, b) => time(b) - time(a));
-
-    const result: ThreadListGroup[] = [];
-    for (const index of sorted) {
-      const label = dateGroupLabel(dates[index], startOfToday);
-      const lastGroup = result[result.length - 1];
-      if (lastGroup?.label === label) {
-        lastGroup.indices.push(index);
-      } else {
-        result.push({ label, indices: [index] });
-      }
+  useEffect(() => {
+    if (view.groupBy !== "workspace" || currentSessionId === null) return;
+    const group = projection.groups.find((item) =>
+      item.sessionIds.includes(currentSessionId),
+    );
+    if (group && !view.expandedGroups.includes(group.key)) {
+      setGroupExpanded(group.key, true);
     }
-    return { filteredIndices, groups: result };
-  }, [threadIds, threadItems, query]);
+  }, [
+    currentSessionId,
+    projection.groups,
+    setGroupExpanded,
+    view.expandedGroups,
+    view.groupBy,
+  ]);
 
-  if (query && filteredIndices.length === 0) {
+  const renderItem = (id: string) => {
+    const index = indexById.get(id);
+    if (index === undefined) return null;
+    return (
+      <ThreadListPrimitive.ItemByIndex
+        key={id}
+        index={index}
+        components={{ ThreadListItem }}
+      />
+    );
+  };
+
+  if (query && filteredIds.length === 0) {
     return (
       <div
         data-slot="aui_thread-list-empty"
@@ -179,66 +283,175 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
     );
   }
 
-  if (!groups) {
-    return filteredIndices.map((index) => (
-      <ThreadListPrimitive.ItemByIndex
-        key={threadIds[index]}
-        index={index}
-        components={{ ThreadListItem }}
-      />
-    ));
+  if (query || view.groupBy === "flat") {
+    return <>{filteredIds.map(renderItem)}</>;
   }
 
-  return groups.map((group) => (
-    <Fragment key={group.label}>
-      <div
-        data-slot="aui_thread-list-group-label"
-        className="text-muted-foreground px-2.5 pt-3 pb-1 text-xs font-medium"
-      >
-        {group.label}
-      </div>
-      {group.indices.map((index) => (
-        <ThreadListPrimitive.ItemByIndex
-          key={threadIds[index]}
-          index={index}
-          components={{ ThreadListItem }}
-        />
+  return (
+    <>
+      {projection.groups.map((group) => (
+          <div key={group.key || "ungrouped"} data-slot="aui_thread-list-group" className="group/workspace">
+            <div
+              data-slot="aui_thread-list-group-trigger"
+              role="button"
+              tabIndex={0}
+              aria-expanded={group.expanded}
+              title={group.path}
+              onClick={() => setGroupExpanded(group.key, !group.expanded)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setGroupExpanded(group.key, !group.expanded);
+                }
+              }}
+              className="text-muted-foreground flex min-h-8 w-full cursor-default items-center gap-1.5 px-2.5 pt-2 pb-1 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            >
+              {!group.expanded ? (
+                <FolderIcon className="size-3.5 shrink-0" />
+              ) : (
+                <FolderOpenIcon className="size-3.5 shrink-0" />
+              )}
+              <span className="min-w-0 truncate">{group.label}</span>
+          <div data-slot="aui_thread-list-group-actions"
+                className="ms-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover/workspace:opacity-100 group-focus-within/workspace:opacity-100 group-has-data-[state=open]/workspace:opacity-100"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                <WorkspaceGroupMore path={group.path ?? group.label} />
+                <ThreadListNew
+                  aria-label={`New thread in ${group.label}`}
+                  tooltip={`New thread in ${group.label}`}
+                  className="size-6 justify-center rounded-md p-0 text-muted-foreground"
+                  onClick={() => {
+                    if (group.workspaceId) setNewSessionWorkspace(group.workspaceId);
+                  }}
+                >
+                  <PlusIcon className="size-3.5" />
+                </ThreadListNew>
+          </div>
+            </div>
+            {group.expanded && (group.sessionIds.length > 0 ? (
+              group.sessionIds.map(renderItem)
+            ) : (
+              <div
+                data-slot="aui_thread-list-group-empty"
+                className="text-muted-foreground px-2.5 py-2 text-xs"
+              >
+                没有会话
+              </div>
+            ))}
+          </div>
       ))}
-    </Fragment>
-  ));
+    </>
+  );
+};
+
+const copyWorkspacePath = async (path: string): Promise<void> => {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(path);
+      return;
+    }
+  } catch {
+    // Clipboard permissions may be unavailable in a proxied local page.
+  }
+
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = path;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  } catch {
+    // Copy is best effort; never surface a rejected clipboard promise.
+  }
+};
+
+const WorkspaceGroupMore: FC<{ path: string }> = ({ path }) => {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenuTrigger asChild>
+        <TooltipIconButton
+          tooltip="Workspace actions"
+          type="button"
+          aria-label="Workspace actions"
+          className="size-6 rounded-md p-0 text-muted-foreground"
+          onClick={(event) => {
+            event.stopPropagation();
+            setOpen((value) => !value);
+          }}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          <MoreHorizontalIcon className="size-3.5" />
+        </TooltipIconButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-44">
+        <DropdownMenuItem
+          onSelect={() => {
+            void copyWorkspacePath(path);
+          }}
+        >
+          复制工作区路径
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 };
 
 export const ThreadListNew = forwardRef<
   HTMLButtonElement,
-  ComponentPropsWithoutRef<typeof Button> & { labelClassName?: string }
->(({ className, labelClassName, children, ...props }, ref) => {
+  ComponentPropsWithoutRef<typeof Button> & { labelClassName?: string; tooltip?: string }
+>(({ className, labelClassName, tooltip, children, ...props }, ref) => {
+  const content = children ?? (
+    <>
+      <PlusIcon
+        data-slot="aui_thread-list-new-icon"
+        className="size-4 shrink-0"
+      />
+      <span
+        data-slot="aui_thread-list-new-label"
+        className={cn("whitespace-nowrap", labelClassName)}
+      >
+        New Thread
+      </span>
+    </>
+  );
+
   return (
     <ThreadListPrimitive.New asChild>
-      <Button
-        ref={ref}
-        variant="ghost"
-        data-slot="aui_thread-list-new"
-        className={cn(
-          "hover:bg-muted data-active:bg-muted h-8 justify-start gap-2 rounded-md px-2.5 text-sm font-normal",
-          className,
-        )}
-        {...props}
-      >
-        {children ?? (
-          <>
-            <PlusIcon
-              data-slot="aui_thread-list-new-icon"
-              className="size-4 shrink-0"
-            />
-            <span
-              data-slot="aui_thread-list-new-label"
-              className={cn("whitespace-nowrap", labelClassName)}
-            >
-              New Thread
-            </span>
-          </>
-        )}
-      </Button>
+      {tooltip ? (
+        <TooltipIconButton
+          ref={ref}
+          tooltip={tooltip}
+          data-slot="aui_thread-list-new"
+          className={cn(
+            "hover:bg-muted data-active:bg-muted h-8 justify-start gap-2 rounded-md px-2.5 text-sm font-normal",
+            className,
+          )}
+          {...props}
+        >
+          {content}
+        </TooltipIconButton>
+      ) : (
+        <Button
+          ref={ref}
+          variant="ghost"
+          data-slot="aui_thread-list-new"
+          className={cn(
+            "hover:bg-muted data-active:bg-muted h-8 justify-start gap-2 rounded-md px-2.5 text-sm font-normal",
+            className,
+          )}
+          {...props}
+        >
+          {content}
+        </Button>
+      )}
     </ThreadListPrimitive.New>
   );
 });
@@ -268,6 +481,9 @@ const ThreadListSkeleton: FC = () => {
 
 export const ThreadListItem: FC = () => {
   const isRunning = useAuiState((s) => s.threadListItem.isRunning);
+  const threadId = useAuiState((s) => s.threadListItem.id);
+  const currentSessionId = useDsh((s) => s.currentSessionId);
+  const isActive = currentSessionId === threadId;
   const [isRenaming, setIsRenaming] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
@@ -281,6 +497,8 @@ export const ThreadListItem: FC = () => {
   return (
     <ThreadListItemPrimitive.Root
       data-slot="aui_thread-list-item"
+      data-active={isActive ? "true" : undefined}
+      aria-current={isActive ? "true" : undefined}
       className="group hover:bg-muted focus-visible:bg-muted data-active:bg-muted has-focus-visible:bg-muted has-data-[state=open]:bg-muted relative flex h-8 items-center rounded-md transition-colors focus-visible:outline-none"
     >
       {isRenaming ? (
@@ -312,7 +530,7 @@ export const ThreadListItem: FC = () => {
           {isRunning && <span className="sr-only">Running</span>}
         </ThreadListItemPrimitive.Trigger>
       )}
-      <ThreadListItemMore onRename={() => setIsRenaming(true)} />
+      <ThreadListItemMore onRename={() => setIsRenaming(true)} isActive={isActive} />
     </ThreadListItemPrimitive.Root>
   );
 };
@@ -381,19 +599,20 @@ const ThreadListItemRename: FC<{
   );
 };
 
-const ThreadListItemMore: FC<{ onRename: () => void }> = ({ onRename }) => {
+const ThreadListItemMore: FC<{ onRename: () => void; isActive: boolean }> = ({ onRename, isActive }) => {
   return (
     <ThreadListItemMorePrimitive.Root sharedFocusGroup>
       <ThreadListItemMorePrimitive.Trigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
+        <TooltipIconButton
+          tooltip="More options"
           data-slot="aui_thread-list-item-more"
-          className="data-[state=open]:bg-accent absolute end-1.5 top-1/2 size-6 -translate-y-1/2 p-0 opacity-0 group-hover:opacity-100 group-has-focus-visible:opacity-100 group-data-active:opacity-100 data-[state=open]:opacity-100"
+          className={cn(
+            "data-[state=open]:bg-accent absolute end-1.5 top-1/2 size-6 -translate-y-1/2 p-0 opacity-0 group-hover:opacity-100 group-has-focus-visible:opacity-100 data-[state=open]:opacity-100",
+            isActive && "opacity-100",
+          )}
         >
           <MoreHorizontalIcon className="size-3.5" />
-          <span className="sr-only">More options</span>
-        </Button>
+        </TooltipIconButton>
       </ThreadListItemMorePrimitive.Trigger>
       <ThreadListItemMorePrimitive.Content
         side="right"

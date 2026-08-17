@@ -1,26 +1,58 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
+import { MenuIcon } from 'lucide-react'
 import { useDsh } from './dsh/store'
 import { connectDownlinks } from './dsh/stream'
+import { TooltipIconButton } from './components/assistant-ui/tooltip-icon-button'
 import { Thread } from './components/assistant-ui/thread'
 import { ThreadList } from './components/assistant-ui/thread-list'
 import { DshRuntimeProvider } from './runtime/DshRuntime'
 
 function App() {
   const error = useDsh((s) => s.error)
+  const currentSessionId = useDsh((s) => s.currentSessionId)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
 
   useEffect(() => {
     void useDsh.getState().boot()
     connectDownlinks()
   }, [])
 
+  useEffect(() => {
+    setSidebarOpen(false)
+  }, [currentSessionId])
+
   return (
-    <div className="grid h-dvh grid-cols-[280px_1fr] overflow-hidden">
-      <div className="min-h-0 overflow-hidden">
+    <div className="grid h-dvh grid-cols-1 overflow-hidden md:grid-cols-[280px_1fr]">
+      {sidebarOpen && (
+        <button
+          type="button"
+          aria-label="Close workspace sidebar"
+          className="fixed inset-0 z-30 bg-black/20 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+      <div
+        data-slot="aui_thread-list-sidebar"
+        data-state={sidebarOpen ? 'open' : 'closed'}
+        className={`${sidebarOpen ? 'fixed inset-y-0 start-0 z-40 block w-[min(280px,85vw)] shadow-xl' : 'hidden'} min-h-0 overflow-hidden bg-muted/20 md:relative md:block md:w-auto md:shadow-none`}
+      >
         <ThreadList />
       </div>
       <main className="relative min-h-0 min-w-0 overflow-hidden">
+        <TooltipIconButton
+          tooltip="Open workspace sidebar"
+          type="button"
+          variant="outline"
+          size="icon"
+          className="absolute start-3 top-3 z-20 size-8 rounded-full bg-background/90 shadow-sm md:hidden"
+          aria-label="Open workspace sidebar"
+          aria-expanded={sidebarOpen}
+          onClick={() => setSidebarOpen(true)}
+        >
+          <MenuIcon className="size-4" />
+        </TooltipIconButton>
         {error && (
-          <div className="absolute inset-x-0 top-0 z-50 border-b border-destructive/40 bg-destructive/10 px-4 py-1.5 text-sm text-destructive">
+          <div role="alert" className="absolute inset-x-0 top-0 z-50 border-b border-destructive/40 bg-destructive/10 px-4 py-1.5 text-sm text-destructive">
             {error}
           </div>
         )}

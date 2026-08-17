@@ -41,17 +41,98 @@ export interface HostDescription {
   canOpenPath: boolean
 }
 
+export interface PermissionOption {
+  name: string
+  value: string
+}
+
+export interface PermissionSelect {
+  currentValue: string
+  options: PermissionOption[]
+}
+
 export interface SessionSummary {
   sessionId: string
+  /** Durable title projected by the host session-title service. */
+  title?: string
+  projections?: {
+    values?: {
+      title?: unknown
+      permissions?: PermissionSelect
+      contextPressure?: ContextPressureProjection
+      contextBreakdown?: ContextBreakdownProjection
+      goal?: GoalProjection | null
+    }
+  }
+  parentSessionId?: string
+  origin?: 'subagent'
   updatedAt: number
   running: boolean
   blank: boolean
-  parentSessionId?: string
-  origin?: 'subagent'
   cwd?: string
   agentPreset?: string
 }
 
+export interface ContextPressureProjection {
+  pressureTokens?: number
+  projectedTokens?: number
+  contextWindow?: number
+}
+
+export interface ContextBreakdownProjection {
+  systemTokens?: number
+  toolsTokens?: number
+  messageTokens?: number
+}
+
+export interface QueueMessage {
+  id: string
+  placement: 'queued' | 'steering' | 'context'
+  text: string
+}
+
+export interface JobView {
+  id: string
+  kind: string
+  label: string
+  status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
+  detail?: string
+  startedAt: number
+  finishedAt?: number
+}
+
+export interface WorkspaceView {
+  workspaceId: string
+  path: string
+  title: string
+  sessionIds: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface WorkspaceListResponse {
+  items: WorkspaceView[]
+  archivedSessionIds?: string[]
+}
+
+export interface GoalRef {
+  id: string
+  revision: number
+}
+
+export interface GoalProjection {
+  goal: {
+    id: string
+    revision: number
+    objective: string
+    phase: 'active' | 'paused' | 'blocked' | 'complete'
+    blockedReason?: { code: string; message: string }
+    maxGoalRounds: number
+  }
+  roundsStarted: number
+  createdAt: number
+  updatedAt: number
+}
 export interface SessionEvent {
   type: string
   seq: number
@@ -72,4 +153,104 @@ export interface PromptContentPart {
   mediaType?: string
   data?: string
   name?: string
+}
+export type ApprovalOutcome = 'allowed-once' | 'rejected'
+
+export interface SessionAttachment {
+  attachment?: {
+    attachmentId?: string
+    mediaType?: string
+    name?: string
+  }
+  data: string
+}
+export interface ModelSelection {
+  provider: string
+  model: string
+  reasoningEffort?: string
+}
+
+export interface ModelReasoningEffort {
+  id: string
+  name: string
+  description?: string
+}
+
+export interface ModelCatalogModel {
+  id: string
+  name: string
+  description?: string
+  reasoning?: {
+    efforts: ModelReasoningEffort[]
+    defaultEffort?: string
+  }
+}
+
+export interface ModelProviderGroup {
+  id: string
+  name: string
+  models: ModelCatalogModel[]
+}
+
+export interface ModelCatalogResponse {
+  groups: ModelProviderGroup[]
+  failures?: { id: string; name: string; message: string }[]
+}
+
+export interface SessionModels {
+  current: ModelSelection
+  routable: boolean
+  groups: ModelProviderGroup[]
+  failures: { id: string; name: string; message: string }[]
+}
+
+export interface CommandEntry {
+  name: string
+  description?: string
+  input?: { hint?: string }
+}
+export interface AgentPresetEntry {
+  id: string
+  trust: 'system' | 'user'
+  isDefault: boolean
+  name?: string
+  description?: string
+  broken?: string
+}
+
+
+
+export interface AgentPresetListResponse {
+  presets: AgentPresetEntry[]
+  authorable: boolean
+  hasDocument: boolean
+}
+
+export interface ServerRequest<T = unknown> {
+  type: 'server-request'
+  rpcId: string
+  method: string
+  payload: T
+}
+
+export type ApprovalRequest = {
+  type: 'approval/requested'
+  sessionId: string
+  approvalId: string
+  toolName: string
+  callId?: string
+  reason?: string
+}
+
+export type QuestionRequest = {
+  type: 'question/requested'
+  sessionId: string
+  questions: unknown[]
+}
+
+export interface PendingInteraction {
+  rpcId: string
+  sessionId: string
+  kind: 'approval' | 'question'
+  payload: ApprovalRequest | QuestionRequest
 }

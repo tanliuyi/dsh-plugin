@@ -2,6 +2,7 @@
 
 export type DshMessagePart =
   | { type: 'text'; text: string }
+  | { type: 'image'; attachmentId: string; mediaType?: string; name?: string; src?: string }
   | { type: 'reasoning'; text: string }
   | {
     type: 'tool'
@@ -79,7 +80,29 @@ function messageIdOf(data: Record<string, unknown> | undefined, fallback: string
 /** 上下文注入摘要上限（与官方 CONTEXT_SUMMARY_MAX_CHARS 同语义）。 */
 const CONTEXT_SUMMARY_MAX_CHARS = 120
 
-/** 从 user/message 的 source 投影折叠行的 producer 标签（官方 contextProvenance 简化版）。 */
+function contentBlocksOf(data: Record<string, unknown> | undefined): Record<string, unknown>[] {
+  if (!data) return []
+  const content = data.content ?? (data.message as Record<string, unknown> | undefined)?.content
+  const blocks = Array.isArray(content) ? content : content == null ? [] : [content]
+  return blocks.filter((block): block is Record<string, unknown> => typeof block === 'object' && block !== null)
+}
+
+function imagePartsOf(data: Record<string, unknown> | undefined): DshMessagePart[] {
+  return contentBlocksOf(data).flatMap((block) => {
+    if (block.type !== 'image') return []
+    const attachment = (block.attachment ?? block) as Record<string, unknown>
+    const attachmentId = String(attachment.attachmentId ?? attachment.id ?? '')
+    if (!attachmentId) return []
+    return [{
+      type: 'image' as const,
+      attachmentId,
+      mediaType: typeof attachment.mediaType === 'string' ? attachment.mediaType : undefined,
+      name: typeof attachment.name === 'string' ? attachment.name : undefined,
+    }]
+  })
+}
+
+
 function contextLabel(source: Record<string, unknown>): string {
   const kind = String(source.kind ?? 'unknown')
   switch (kind) {
@@ -94,6 +117,72 @@ function contextLabel(source: Record<string, unknown>): string {
   }
 }
 
+function partialMessageId(data: Record<string, unknown>): string {
+  return `partial-${String(data.turn ?? 'unknown')}-${String(data.step ?? '0')}`
+}
+
+function blockText(block: unknown): string {
+  return typeof block === 'object' && block !== null && typeof (block as Record<string, unknown>).text === 'string'
+    ? String((block as Record<string, unknown>).text)
+    : ''
+}
+
+function applyAssistantChunk(messages: DshMessage[], data: Record<string, unknown>, base: { seq: number; createdAt: number }): DshMessage[] {
+  const chunk = (data.chunk ?? {}) as Record<string, unknown>
+  const kind = String(chunk.type ?? '')
+  const index = typeof chunk.index === 'number' ? chunk.index : 0
+  const id = partialMessageId(data)
+  const existingIndex = messages.findIndex((message) => message.id === id)
+  const existing = existingIndex >= 0 ? messages[existingIndex]! : {
+    id,
+    role: 'assistant' as const,
+    parts: [],
+    ...base,
+  }
+  const parts = [...existing.parts]
+  const blockType = kind === 'reasoning-delta' || chunk.blockType === 'reasoning' || (chunk.block as Record<string, unknown> | undefined)?.type === 'reasoning'
+    ? 'reasoning'
+    : 'text'
+  const current = parts[index]
+
+  if (kind === 'block-start') {
+    parts[index] = blockType === 'reasoning' ? { type: 'reasoning', text: '' } : { type: 'text', text: '' }
+  } else if (kind === 'reasoning-delta' || kind === 'text-delta') {
+    const text = typeof chunk.text === 'string' ? chunk.text : ''
+    const targetType = kind === 'reasoning-delta' ? 'reasoning' : 'text'
+    parts[index] = current?.type === targetType
+      ? { ...current, text: current.text + text }
+      : { type: targetType, text }
+  } else if (kind === 'block-end') {
+    const block = (chunk.block ?? {}) as Record<string, unknown>
+    if (block.type === 'reasoning' || block.type === 'text') {
+      parts[index] = { type: block.type, text: blockText(block) }
+    }
+  } else {
+    return messages
+  }
+
+  const next = { ...existing, parts, ...base }
+  if (existingIndex >= 0) {
+    const result = [...messages]
+    result[existingIndex] = next
+    return result
+  }
+  return [...messages, next]
+}
+
+/** 解析最终 assistant/message；实时 partial 会在同一 turn/step 上原地替换。 */
+function finalizedAssistantMessage(messages: DshMessage[], data: Record<string, unknown>, base: { seq: number; createdAt: number }, parts: DshMessagePart[]): DshMessage[] {
+  const message = data.message as Record<string, unknown> | undefined
+  const id = messageIdOf(message, `a-${base.seq}`)
+  const finalized: DshMessage = { id, role: 'assistant', parts, ...base }
+  const partialIndex = messages.findIndex((item) => item.id === partialMessageId(data))
+  if (partialIndex < 0) return [...messages, finalized]
+  const result = [...messages]
+  result[partialIndex] = finalized
+  return result
+}
+
 /** 递增组装：把一条新事件并入已有消息列表。返回 { messages, isRunning } 或 null（忽略）。 */
 export function foldEvent(
   messages: DshMessage[],
@@ -105,7 +194,8 @@ export function foldEvent(
   switch (ev.type) {
     case 'user/message': {
       const text = textOf(data)
-      if (!text) return null
+      const images = imagePartsOf(data)
+      if (!text && images.length === 0) return null
       const source = (data.source ?? {}) as Record<string, unknown>
       // 只有 source.kind === 'user' 是真实用户消息；其余（plugin、skill-catalog、
       // agent-instructions、session-reference…）是模型可见的上下文注入，折叠渲染。
@@ -122,19 +212,18 @@ export function foldEvent(
         }
         return { messages: [...messages, msg] }
       }
-      const msg: DshMessage = { id: messageIdOf(data, `u-${ev.seq}`), role: 'user', parts: [{ type: 'text', text }], ...base }
+      if (source.kind === 'user' && /^\/permission\s+[^\s]+\s*$/.test(text.trim())) return null
+      const msg: DshMessage = { id: messageIdOf(data, `u-${ev.seq}`), role: 'user', parts: [...(text ? [{ type: 'text' as const, text }] : []), ...images], ...base }
+      if (msg.parts.length === 0) return null
       return { messages: [...messages, msg] }
     }
+    case 'assistant/chunk': {
+      return { messages: applyAssistantChunk(messages, data, base), isRunning: true }
+    }
     case 'assistant/message': {
-      const parts = assistantPartsOf(data)
+      const parts = [...assistantPartsOf(data), ...imagePartsOf(data)]
       if (parts.length === 0) return null
-      const msg: DshMessage = {
-        id: messageIdOf(data.message as Record<string, unknown> | undefined, `a-${ev.seq}`),
-        role: 'assistant',
-        parts,
-        ...base,
-      }
-      return { messages: [...messages, msg] }
+      return { messages: finalizedAssistantMessage(messages, data, base, parts) }
     }
     case 'tool/call': {
       const callId = String(data.callId ?? `t-${ev.seq}`)
@@ -149,7 +238,8 @@ export function foldEvent(
     }
     case 'tool/result': {
       // 关联键：callId 位于 message.content[0].toolCallId（顶层 data 无 callId）。
-      const firstPart = (data.message?.content?.[0] ?? {}) as Record<string, unknown>
+      const message = (data.message ?? {}) as Record<string, unknown>
+      const firstPart = (Array.isArray(message.content) ? message.content[0] : {}) as Record<string, unknown>
       const callId = String(firstPart.toolCallId ?? data.callId ?? '')
       if (!callId) return null
       const idx = messages.findIndex((m) => m.id === callId)

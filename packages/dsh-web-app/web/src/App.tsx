@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { MenuIcon } from 'lucide-react'
+import { MenuIcon, Settings2Icon } from 'lucide-react'
 import { useDsh } from './dsh/store'
 import { connectDownlinks } from './dsh/stream'
 import { TooltipIconButton } from './components/assistant-ui/tooltip-icon-button'
+import { SettingsDialog } from './components/settings-dialog'
 import { Thread } from './components/assistant-ui/thread'
 import { ThreadList } from './components/assistant-ui/thread-list'
 import { DshRuntimeProvider } from './runtime/DshRuntime'
@@ -11,6 +12,7 @@ function App() {
   const error = useDsh((s) => s.error)
   const currentSessionId = useDsh((s) => s.currentSessionId)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   useEffect(() => {
     void useDsh.getState().boot()
@@ -34,7 +36,7 @@ function App() {
       <div
         data-slot="aui_thread-list-sidebar"
         data-state={sidebarOpen ? 'open' : 'closed'}
-        className={`${sidebarOpen ? 'fixed inset-y-0 start-0 z-40 block w-[min(280px,85vw)] shadow-xl' : 'hidden'} min-h-0 overflow-hidden bg-muted/20 md:relative md:block md:w-auto md:shadow-none`}
+        className={`${sidebarOpen ? 'fixed inset-y-0 start-0 z-40 flex w-[min(280px,85vw)] shadow-xl' : 'hidden'} min-h-0 flex-col overflow-hidden bg-muted/20 md:relative md:flex md:w-auto md:shadow-none`}
       >
         <ThreadList />
       </div>
@@ -51,12 +53,24 @@ function App() {
         >
           <MenuIcon className="size-4" />
         </TooltipIconButton>
+        <TooltipIconButton
+          tooltip="Open settings"
+          type="button"
+          variant="outline"
+          size="icon"
+          className="absolute end-3 top-3 z-20 size-8 rounded-full bg-background/90 shadow-sm"
+          aria-label="Open settings"
+          onClick={() => setSettingsOpen(true)}
+        >
+          <Settings2Icon className="size-4" />
+        </TooltipIconButton>
         {error && (
           <div role="alert" className="absolute inset-x-0 top-0 z-50 border-b border-destructive/40 bg-destructive/10 px-4 py-1.5 text-sm text-destructive">
             {error}
           </div>
         )}
         <Thread />
+        <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       </main>
     </div>
   )

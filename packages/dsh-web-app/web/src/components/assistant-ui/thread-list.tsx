@@ -1,6 +1,7 @@
 "use client";
 
 import { deriveThreadListProjection } from "@/dsh/thread-list";
+import { rpc } from "@/dsh/api";
 import { useDsh } from "@/dsh/store";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { Button } from "@/components/ui/button";
@@ -184,7 +185,7 @@ export const ThreadListItems: FC<
   return (
     <div
       data-slot="aui_thread-list-items"
-      className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain", className)}
+      className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain -me-2 pe-2", className)}
       {...props}
     >
       <AuiIf condition={(s) => s.threads.isLoading}>
@@ -209,6 +210,34 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   const setNewSessionWorkspace = useDsh((s) => s.setNewSessionWorkspace);
   const threadIds = useAuiState((s) => s.threads.threadIds);
   const query = searchQuery.trim().toLowerCase();
+  const openSession = useDsh((s) => s.openSession);
+  const [remoteResults, setRemoteResults] = useState<Array<{ sessionId: string; snippet: string }>>([]);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+
+  useEffect(() => {
+    if (query.length < 2) {
+      setRemoteResults([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      setRemoteLoading(true);
+      void rpc<{ items: Array<{ sessionId: string; snippet: string }>; hasMore: boolean }>("session.search", { query })
+        .then((result) => {
+          if (!cancelled) setRemoteResults(result.ok ? result.value.items : []);
+        })
+        .catch(() => {
+          if (!cancelled) setRemoteResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setRemoteLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [query]);
 
   const projection = useMemo(
     () =>
@@ -272,18 +301,34 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
     );
   };
 
-  if (query && filteredIds.length === 0) {
+  if (query) {
+    const remoteOnly = remoteResults.filter((result) => !filteredIds.includes(result.sessionId));
+    if (filteredIds.length === 0 && remoteOnly.length === 0) {
+      return (
+        <div data-slot="aui_thread-list-empty" className="text-muted-foreground px-2.5 py-4 text-sm">
+          {remoteLoading ? "Searching sessions…" : "No threads found"}
+        </div>
+      );
+    }
     return (
-      <div
-        data-slot="aui_thread-list-empty"
-        className="text-muted-foreground px-2.5 py-4 text-sm"
-      >
-        No threads found
+      <div className="grid gap-1">
+        {remoteOnly.map((result) => (
+          <button
+            key={result.sessionId}
+            type="button"
+            className="flex min-w-0 flex-col items-start rounded-md px-2.5 py-2 text-start hover:bg-muted"
+            onClick={() => void openSession(result.sessionId)}
+          >
+            <span className="w-full truncate text-sm text-foreground">{result.snippet || result.sessionId}</span>
+            <span className="w-full truncate text-xs text-muted-foreground">{result.sessionId}</span>
+          </button>
+        ))}
+        {filteredIds.map(renderItem)}
       </div>
     );
   }
 
-  if (query || view.groupBy === "flat") {
+  if (view.groupBy === "flat") {
     return <>{filteredIds.map(renderItem)}</>;
   }
 
@@ -317,7 +362,7 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
                 onClick={(event) => event.stopPropagation()}
                 onKeyDown={(event) => event.stopPropagation()}
               >
-                <WorkspaceGroupMore path={group.path ?? group.label} />
+                <WorkspaceGroupMore workspaceId={group.workspaceId} path={group.path ?? group.label} />
                 <ThreadListNew
                   aria-label={`New thread in ${group.label}`}
                   tooltip={`New thread in ${group.label}`}
@@ -371,8 +416,10 @@ const copyWorkspacePath = async (path: string): Promise<void> => {
   }
 };
 
-const WorkspaceGroupMore: FC<{ path: string }> = ({ path }) => {
+const WorkspaceGroupMore: FC<{ workspaceId?: string; path: string }> = ({ workspaceId, path }) => {
   const [open, setOpen] = useState(false);
+  const renameWorkspace = useDsh((state) => state.renameWorkspace);
+  const deleteWorkspace = useDsh((state) => state.deleteWorkspace);
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -399,6 +446,22 @@ const WorkspaceGroupMore: FC<{ path: string }> = ({ path }) => {
         >
           复制工作区路径
         </DropdownMenuItem>
+         {workspaceId && (
+           <>
+             <DropdownMenuSeparator />
+             <DropdownMenuItem onSelect={() => {
+               const title = window.prompt("重命名工作区", path.split(/[\\\\/]/).filter(Boolean).pop() ?? "");
+               if (title?.trim()) void renameWorkspace(workspaceId, title).catch(() => {});
+             }}>
+               重命名
+             </DropdownMenuItem>
+             <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => {
+               if (window.confirm("移除工作区注册不会删除目录或会话。继续？")) void deleteWorkspace(workspaceId).catch(() => {});
+             }}>
+               移除工作区
+             </DropdownMenuItem>
+           </>
+         )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

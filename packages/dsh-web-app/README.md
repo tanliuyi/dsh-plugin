@@ -65,19 +65,13 @@ tests/            #   Playwright 端到端验证
 ## 现状
 
 - [x] 自建 host 传输组合，与官方 web profile 完全隔离（默认端口 3090）
-- [x] `/api` 一元 RPC + 双 WebSocket downlink
-- [x] host.describe / session.list / session.create
-- [x] 会话历史渲染（assistant-ui 官方 Thread：markdown、reasoning 折叠、
-      工具调用卡片；assistant/message 按 block 类型解析，reasoning 不混入正文）
-- [x] 上下文注入折叠（runtime context / skill 目录等 source.kind ≠ user 的
-      user/message 折叠为一行小字，只有真实用户消息渲染为气泡）
-- [x] session.prompt 发送（文本 + 图片附件）+ 运行状态 + 取消
-- [x] 官方 ThreadList 会话列表（213+ 会话、新建、归档）
-- [x] 会话滚动（grid 子项 min-h-0 约束，Viewport 内部滚动）
-- [x] assistant-ui ExternalStoreRuntime 适配（convertMessage/onNew/onCancel/threadList）
+- [x] `/api` 一元 RPC + 双 WebSocket downlink，支持 envelope/raw frame 兼容和自动重连
+- [x] host/session/workspace 基础生命周期：describe、list、create、history、rename、fork、archive
+- [x] assistant-ui 官方 Thread/ThreadList/Composer：Markdown、reasoning、附件、工具 fallback、External Store Runtime
+- [x] 多 step turn 的运行态：工具完成和中间 assistant message 不会提前结束，只有 turn/end 或 host status 结束
+- [x] 上下文注入折叠、图片 hydration、工具错误卡片、审批/提问应答
+- [x] queue/jobs/projection、goal、model/reasoning、agent preset、subagent 基础能力
+- [x] settings namespace JSON 编辑、远端 session 搜索、workspace 分组/平铺/排序
 - [x] tailwind v4 + shadcn 主题（深色/浅色，跟随系统）
-- [x] Playwright 端到端验证（新建会话 → 发送 → 回复渲染，零错误）
-- [ ] 审批/提问应答 UI、队列管理
-- [ ] 设置/模型页（settings.* / credentials.* / llm.*）
-- [ ] 工作区管理、子代理、任务/目标
-- [ ] 会话搜索、ThreadList 分组与分页
+
+详细对齐矩阵见 [UPSTREAM-ALIGNMENT.md](./UPSTREAM-ALIGNMENT.md)。当前剩余缺口主要是 credentials/provider onboarding、agent preset authoring、skills/web search 业务协议、produced files、队列 edit、反馈和 session-log export；分页、虚拟化、滚动锚定及专用卡片属于可选 UI 层能力，不作为本包的功能对齐要求。

@@ -25,9 +25,7 @@ interface MuxFrame {
   seq?: number
 }
 
-interface HostFrame {
-  type: string
-}
+type HostFrame = JsonRecord & { type: string }
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null
@@ -43,6 +41,7 @@ function isMuxFrame(value: unknown): value is MuxFrame {
     value.type === 'session/subscribed' ||
     value.type === 'approval/requested' ||
     value.type === 'question/requested' ||
+    value.type === 'question/resolved' ||
     value.type === 'approval/resolved' ||
     value.type === 'session/queue' ||
     value.type === 'session/jobs' ||
@@ -134,9 +133,32 @@ function startGeneration(): void {
       store.getState().addPendingInteraction(payload)
       return
     }
-    if (isHostFrame(payload)) {
-      void store.getState().refreshSessions().catch(() => {})
+    if (!isHostFrame(payload)) return
+    if (payload.type === 'host/session-status' && typeof payload.sessionId === 'string' && typeof payload.running === 'boolean') {
+      const sessionId = payload.sessionId
+      const running = payload.running
+      store.setState((state) => ({
+        sessions: state.sessions.map((session) => session.sessionId === sessionId ? { ...session, running } : session),
+        ...(state.currentSessionId === sessionId ? { isRunning: running } : {}),
+      }))
+      return
     }
+    if (payload.type === 'host/agent-error' && typeof payload.message === 'string') {
+      store.setState({ error: payload.message })
+      return
+    }
+    if (payload.type === 'host/session-removed' && typeof payload.sessionId === 'string') {
+      store.setState((state) => ({
+        sessions: state.sessions.filter((session) => session.sessionId !== payload.sessionId),
+        ...(state.currentSessionId === payload.sessionId ? { currentSessionId: null, messages: [], isRunning: false } : {}),
+      }))
+      return
+    }
+    if (payload.type === 'host/archived-sessions-changed' && Array.isArray(payload.archivedSessionIds)) {
+      store.setState({ archivedSessionIds: payload.archivedSessionIds.filter((id): id is string => typeof id === 'string') })
+      return
+    }
+    void store.getState().refreshSessions().catch(() => {})
   }
 
   const open = (path: string, kind: 'mux' | 'host', handle: (payload: unknown, request?: ServerRequest) => void): void => {
@@ -156,11 +178,15 @@ function startGeneration(): void {
         failGeneration()
         return
       }
-      if (!isServerRequest(envelope)) {
-        failGeneration()
-        return
+      // The shipped host wraps every payload in a server-request envelope, but
+      // accepting a raw frame keeps the browser compatible with older proxies
+      // and makes reconnects fail only for malformed JSON, not for a valid
+      // frame shape from a compatible carrier.
+      if (isServerRequest(envelope)) {
+        handle(envelope.payload, envelope)
+      } else if (isMuxFrame(envelope) || isHostFrame(envelope)) {
+        handle(envelope)
       }
-      handle(envelope.payload, envelope)
     }
     ws.onclose = failGeneration
     ws.onerror = failGeneration

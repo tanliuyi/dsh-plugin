@@ -10,6 +10,8 @@ export type DshMessagePart =
     callId: string
     args: unknown
     result?: unknown
+    isError?: boolean
+    error?: unknown
     status: 'running' | 'complete' | 'error'
   }
   /** 模型可见但用户弱化的上下文注入（runtime context、skill 目录等），折叠显示。 */
@@ -222,7 +224,9 @@ export function foldEvent(
     }
     case 'assistant/message': {
       const parts = [...assistantPartsOf(data), ...imagePartsOf(data)]
-      if (parts.length === 0) return null
+      // assistant/message can be an intermediate step before another tool call;
+      // only turn/end or host/session-status is authoritative for completion.
+      if (parts.length === 0) return { messages }
       return { messages: finalizedAssistantMessage(messages, data, base, parts) }
     }
     case 'tool/call': {
@@ -242,15 +246,29 @@ export function foldEvent(
       const firstPart = (Array.isArray(message.content) ? message.content[0] : {}) as Record<string, unknown>
       const callId = String(firstPart.toolCallId ?? data.callId ?? '')
       if (!callId) return null
+      const isError = firstPart.isError === true || data.isError === true || firstPart.error !== undefined || data.error !== undefined
+      const result = firstPart.content ?? data.result ?? data.output ?? {}
+      const error = firstPart.error ?? data.error
       const idx = messages.findIndex((m) => m.id === callId)
-      if (idx === -1) return null
+      if (idx === -1) {
+        const toolName = String(firstPart.name ?? data.name ?? data.toolName ?? 'tool')
+        const toolPart: DshMessagePart = {
+          type: 'tool', toolName, callId,
+          args: firstPart.arguments ?? data.arguments ?? data.args ?? {},
+          result,
+          ...(firstPart.isError !== undefined || data.isError !== undefined ? { isError: firstPart.isError === true || data.isError === true } : {}),
+          ...(error !== undefined ? { error } : {}),
+          status: isError ? 'error' : 'complete',
+        }
+        return { messages: [...messages, { id: callId, role: 'assistant', parts: [toolPart], ...base }] }
+      }
       const next = [...messages]
       const target = next[idx]!
       next[idx] = {
         ...target,
         parts: target.parts.map((p) =>
           p.type === 'tool' && p.callId === callId
-            ? { ...p, status: 'complete' as const, result: firstPart.content ?? data.result ?? data.output ?? {} }
+            ? { ...p, status: isError ? 'error' as const : 'complete' as const, result, ...(firstPart.isError !== undefined || data.isError !== undefined ? { isError: firstPart.isError === true || data.isError === true } : {}), ...(error !== undefined ? { error } : {}) }
             : p,
         ),
       }

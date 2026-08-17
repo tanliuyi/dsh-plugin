@@ -3,7 +3,7 @@
 import type { ComponentProps } from "react";
 import { ArrowUpIcon, XIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { field, ghostButton, mono, paper } from "@/lib/surfaces";
+import { field, ghostButton, mono } from "@/lib/surfaces";
 
 export interface QueuedMessage {
   id: string;
@@ -12,7 +12,6 @@ export interface QueuedMessage {
 }
 
 export function MessageQueue({
-  running,
   queued,
   onCancel,
   onSteer,
@@ -20,31 +19,24 @@ export function MessageQueue({
   ...props
 }: Omit<
   ComponentProps<"div">,
-  "children" | "running" | "queued" | "onCancel" | "onSteer"
+  "children" | "queued" | "onCancel" | "onSteer"
 > & {
-  running: string;
   queued: readonly QueuedMessage[];
   onCancel?: (id: string) => void;
   onSteer?: (id: string) => void;
 }) {
+  if (queued.length === 0) return null;
   return (
     <div
       data-slot="message-queue"
-      className={cn("flex w-full max-w-sm flex-col gap-2", className)}
+      className={cn(
+        "flex w-full max-w-none flex-col gap-2",
+        "animate-in fade-in slide-in-from-bottom-2 duration-300 fill-mode-both",
+        className,
+      )}
 
       {...props}
     >
-      <div className={cn(paper, "flex items-center gap-2.5 rounded-2xl p-3")}>
-        <span className="relative flex size-2 shrink-0">
-          <span className="absolute inline-flex size-full animate-ping rounded-full bg-blue-500/60 motion-reduce:hidden" />
-          <span className="relative inline-flex size-2 rounded-full bg-blue-500 dark:bg-blue-400" />
-        </span>
-        <span className="text-foreground/90 min-w-0 flex-1 truncate text-[13.5px]">
-          {running}
-        </span>
-        <span className={cn(mono, "text-foreground/35 shrink-0")}>running</span>
-      </div>
-
       {queued.length > 0 && (
         <div className="flex items-baseline justify-between px-1">
           <span className={cn(mono, "text-foreground/35")}>

@@ -93,6 +93,26 @@ async function sendPrompt(
   if (!result.ok) throw new Error(result.error.message)
 }
 
+async function sendSubagentPrompt(
+  session: { sessionId: string; parentSessionId?: string },
+  parts: PromptContentPart[],
+): Promise<void> {
+  if (!session.parentSessionId) throw new Error('subagent parent is unavailable')
+  const catalog = await rpc<{ entries: Array<{ kind: 'child' | 'diagnostic'; id: string; mode?: 'one-shot' | 'continuable' }>; parentAvailable: boolean }>('subagent.list', {
+    parentSessionId: session.parentSessionId,
+  })
+  if (!catalog.ok) throw new Error(catalog.error.message)
+  const child = catalog.value.entries.find((entry) => entry.kind === 'child' && entry.id === session.sessionId)
+  if (!child || child.kind !== 'child' || child.mode !== 'continuable') throw new Error('this subagent is read-only')
+  const result = await rpc('subagent.prompt', {
+    parentSessionId: session.parentSessionId,
+    childSessionId: session.sessionId,
+    mode: child.mode,
+    content: parts,
+  })
+  if (!result.ok) throw new Error(result.error.message)
+}
+
 export function DshRuntimeProvider({ children }: { children: React.ReactNode }) {
   const messages = useDsh((s) => s.messages)
   const isRunning = useDsh((s) => s.isRunning)
@@ -123,12 +143,24 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
       sessionId = useDsh.getState().currentSessionId
     }
     if (sessionId === null) throw new Error('failed to create session')
-    await sendPrompt(sessionId, parts)
+    const session = useDsh.getState().sessions.find((item) => item.sessionId === sessionId)
+    if (session?.origin === 'subagent') await sendSubagentPrompt(session, parts)
+    else await sendPrompt(sessionId, parts)
     markSessionActive(sessionId)
   }, [createSession, markSessionActive])
 
   const onCancel = useCallback(async () => {
     if (currentSessionId === null) return
+    const session = useDsh.getState().sessions.find((item) => item.sessionId === currentSessionId)
+    if (session?.origin === 'subagent' && session.parentSessionId) {
+      const catalog = await rpc<{ entries: Array<{ kind: 'child' | 'diagnostic'; id: string; mode?: 'one-shot' | 'continuable' }> }>('subagent.list', { parentSessionId: session.parentSessionId })
+      if (!catalog.ok) throw new Error(catalog.error.message)
+      const child = catalog.value.entries.find((entry) => entry.kind === 'child' && entry.id === currentSessionId)
+      if (!child || child.kind !== 'child' || child.mode !== 'continuable') throw new Error('this subagent is read-only')
+      const result = await rpc('subagent.interrupt', { parentSessionId: session.parentSessionId, childSessionId: currentSessionId, mode: child.mode })
+      if (!result.ok) throw new Error(result.error.message)
+      return
+    }
     const result = await rpc('session.cancel', { sessionId: currentSessionId })
     if (!result.ok) throw new Error(result.error.message)
   }, [currentSessionId])
@@ -139,6 +171,7 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
   )
 
   const threadList = useMemo<ExternalStoreThreadListAdapter>(() => ({
+    threadId: currentSessionId ?? undefined,
     threads: projection.sessions.map((s) => ({
       status: 'regular',
       id: s.sessionId,
@@ -150,7 +183,7 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
       await openSession(threadId)
     },
     onSwitchToNewThread: async () => {
-      await createSession()
+      await createSession(true)
     },
     onRename: async (threadId, title) => {
       await renameSession(threadId, title)
@@ -160,13 +193,32 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
       if (!result.ok) throw new Error(result.error.message)
       await refreshSessions()
     },
-  }), [projection.sessions, openSession, createSession, refreshSessions, renameSession])
+    onDelete: async (threadId) => {
+      const result = await rpc('workspace.archiveSession', { sessionId: threadId })
+      if (!result.ok) throw new Error(result.error.message)
+      await refreshSessions()
+    },
+  }), [currentSessionId, projection.sessions, openSession, createSession, refreshSessions, renameSession])
 
   const runtime = useExternalStoreRuntime({
     messages: converted,
     isRunning,
     onNew,
     onCancel,
+    onEdit: async (message) => {
+      const sessionId = useDsh.getState().currentSessionId
+      const parts = toPromptParts(message)
+      if (!sessionId || parts.length === 0) throw new Error('cannot edit an empty message')
+      await sendPrompt(sessionId, parts)
+    },
+    onReload: async () => {
+      const sessionId = useDsh.getState().currentSessionId
+      if (sessionId) await openSession(sessionId)
+    },
+    onRefetchThread: async () => {
+      const sessionId = useDsh.getState().currentSessionId
+      if (sessionId) await openSession(sessionId)
+    },
     adapters: {
       threadList,
       attachments: new SimpleImageAttachmentAdapter(),

@@ -174,17 +174,17 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
 
           <ThreadPrimitive.ViewportFooter
             className={cn(
-              "aui-thread-viewport-footer bg-background flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
+              "aui-thread-viewport-footer bg-background flex flex-col gap-2 overflow-visible pb-4 md:pb-6",
               !isEmpty &&
                 "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
-            <GoalBar />
             <JobStatusBar />
             <PendingInteractionCards />
             <QueueDock />
+            <GoalBar />
             <Composer />
             <AuiIf condition={(s) => isNewChatView(s)}>
               <div data-slot="aui_thread-suggestions-spacer" className="min-h-8">
@@ -298,6 +298,9 @@ const PendingInteractionCards: FC = () => {
   );
   const respond = useDsh((s) => s.respondToInteraction);
 
+  // 无待处理交互时不渲染，避免空容器占位。
+  if (pending.length === 0) return null;
+
   return (
     <div className="flex flex-col items-end gap-3">
       {pending.map((item) => {
@@ -395,14 +398,16 @@ const QueueDock: FC = () => {
   const currentSessionId = useDsh((s) => s.currentSessionId);
   const queueSessionId = useDsh((s) => s.queueSessionId);
   const queueItems = useDsh((s) => s.queueItems);
-  const isRunning = useDsh((s) => s.isRunning);
   const cancel = useDsh((s) => s.onCancelQueueItem);
   const steer = useDsh((s) => s.onSteerQueueItem);
-  if (!isRunning || queueSessionId !== currentSessionId) return null;
+  const queued = queueItems.filter((item) => item.placement === "queued");
+  // Queue snapshots remain actionable after a turn is cancelled or settles.
+  if (queueSessionId !== currentSessionId || queued.length === 0) {
+    return null;
+  }
   return (
     <MessageQueue
-      running="Current response"
-      queued={queueItems.filter((item) => item.placement === "queued")}
+      queued={queued}
       onCancel={(id) => void cancel(id)}
       onSteer={(id) => void steer(id)}
     />
@@ -726,12 +731,29 @@ const ComposerContextAction: FC = () => {
   return <ComposerContext usage={usage} />;
 };
 
+const PlanModeAction: FC = () => {
+  const active = useDsh((s) => s.planMode);
+  const executeCommand = useDsh((s) => s.executeCommand);
+  return (
+    <button
+      type="button"
+      className={cn("h-7 rounded-full border px-2.5 text-xs transition-colors", active ? "border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300" : "text-muted-foreground hover:bg-muted")}
+      aria-pressed={active}
+      title={active ? "Disable plan mode" : "Enable plan mode"}
+      onClick={() => void executeCommand(active ? "/plan off" : "/plan")}
+    >
+      Plan
+    </button>
+  );
+};
+
 const ComposerAction: FC = () => {
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
       <div className="flex items-center gap-1.5">
         <ComposerAddAttachment />
         <PermissionSelectorAction />
+        <PlanModeAction />
       </div>
       <div className="flex items-center gap-1.5">
         <ModelSelectorAction />

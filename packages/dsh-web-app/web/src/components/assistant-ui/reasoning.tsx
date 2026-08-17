@@ -30,7 +30,7 @@ const ANIMATION_DURATION = 200;
 
 const ReasoningPreviewContext = createContext(false);
 
-const reasoningVariants = cva("aui-reasoning-root mb-4 w-full", {
+const reasoningVariants = cva("aui-reasoning-root w-full", {
   variants: {
     variant: {
       outline: "rounded-lg border px-3 py-2",
@@ -189,10 +189,6 @@ function ReasoningTrigger({
       )}
       {...props}
     >
-      <BrainIcon
-        data-slot="reasoning-trigger-icon"
-        className="aui-reasoning-trigger-icon size-4 shrink-0"
-      />
       <span
         data-slot="reasoning-trigger-label"
         className="aui-reasoning-trigger-label-wrapper relative inline-block leading-none tabular-nums"

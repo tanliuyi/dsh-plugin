@@ -130,7 +130,7 @@ function ToolGroupTrigger({
           "group-data-[variant=muted]/tool-group-root:grow",
         )}
       >
-        <span className="text-xs">{label}</span>
+        <span className="text-md">{label}</span>
         {active && (
           <span
             aria-hidden
@@ -144,7 +144,7 @@ function ToolGroupTrigger({
       <ChevronDownIcon
         data-slot="tool-group-trigger-chevron"
         className={cn(
-          "aui-tool-group-trigger-chevron size-3 shrink-0",
+          "aui-tool-group-trigger-chevron size-4 shrink-0",
           "transition-transform duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
           "-rotate-90",
           "group-data-open/trigger:rotate-0",

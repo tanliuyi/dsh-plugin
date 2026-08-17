@@ -115,6 +115,50 @@ export interface WorkspaceListResponse {
   archivedSessionIds?: string[]
 }
 
+export type SubagentListEntry =
+  | {
+    kind: 'child'
+    id: string
+    activity: 'running' | 'inactive'
+    hasChildren: boolean
+    mode: 'one-shot' | 'continuable'
+    label?: string
+  }
+  | { kind: 'diagnostic'; id: string; reason: 'corrupt' | 'unsupported' | 'unavailable' }
+
+export interface SubagentCatalog {
+  entries: SubagentListEntry[]
+  parentAvailable: boolean
+}
+
+export interface SubagentAddress {
+  parentSessionId: string
+  childSessionId: string
+  mode: 'one-shot' | 'continuable'
+}
+
+export interface SettingsSecretView {
+  path: string[]
+  set: boolean
+}
+
+export interface SettingsNamespaceView {
+  ns: string
+  schema: unknown
+  value: unknown
+  base?: unknown
+  user?: unknown
+  applies: 'live' | 'restart'
+  secrets: SettingsSecretView[]
+  revision: number
+}
+
+export interface SettingsDescribeResponse {
+  writable: boolean
+  hasDocument: boolean
+  namespaces: SettingsNamespaceView[]
+}
+
 export interface GoalRef {
   id: string
   revision: number

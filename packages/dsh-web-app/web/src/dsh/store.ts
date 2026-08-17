@@ -1,7 +1,7 @@
 /** zustand store：会话列表、Workspace 分组、当前会话消息与 mux 流状态。 */
 
 import { create } from 'zustand'
-import { rpc, respond, type AgentPresetEntry, type AgentPresetListResponse, type CommandEntry, type ContextBreakdownProjection, type ContextPressureProjection, type GoalProjection, type JobView, type ModelCatalogModel, type ModelCatalogResponse, type PendingInteraction, type PermissionSelect, type QueueMessage, type ServerRequest, type SessionAttachment, type SessionModels, type SessionSummary, type WorkspaceListResponse, type WorkspaceView } from './api'
+import { rpc, respond, type AgentPresetEntry, type AgentPresetListResponse, type CommandEntry, type ContextBreakdownProjection, type ContextPressureProjection, type GoalProjection, type JobView, type ModelCatalogModel, type ModelCatalogResponse, type PendingInteraction, type PermissionSelect, type QueueMessage, type ServerRequest, type SessionAttachment, type SessionModels, type SessionSummary, type SettingsDescribeResponse, type SubagentAddress, type SubagentCatalog, type WorkspaceListResponse, type WorkspaceView } from './api'
 import { foldEvent, foldHistory, type DshMessage } from './messages'
 
 const THREAD_LIST_VIEW_STORAGE_KEY = 'dsh.workspace.view.v1'
@@ -28,6 +28,7 @@ export interface SessionView {
   goal?: GoalProjection | null;
   parentSessionId?: string;
   origin?: 'subagent';
+  subagentMode?: 'one-shot' | 'continuable';
 }
 
 export interface ContextUsage {
@@ -114,6 +115,10 @@ async function goalRpc(method: string, payload: unknown): Promise<void> {
   const result = await rpc(method, payload)
   if (!result.ok) throw new Error(result.error.message)
 }
+
+let openSessionGeneration = 0
+let createSessionInFlight: Promise<void> | null = null
+
 interface DshState {
   connected: boolean
   host: { version: string; cwd: string; model?: string } | null
@@ -121,6 +126,8 @@ interface DshState {
   workspaces: WorkspaceView[]
   archivedSessionIds: string[]
   agentPresets: AgentPresetEntry[]
+  subagentsByParent: Record<string, SubagentCatalog>
+  settings: SettingsDescribeResponse | null
   newSessionWorkspaceId: string | null
   newSessionAgentPreset: string | null
   threadListView: ThreadListViewState
@@ -134,6 +141,7 @@ interface DshState {
   modelCatalogLoading: boolean
   currentSessionId: string | null
   goal: GoalProjection | null
+  planMode: boolean
   createGoal: (objective: string, maxGoalRounds?: number) => Promise<void>
   editGoal: (objective?: string, maxGoalRounds?: number) => Promise<void>
   pauseGoal: () => Promise<void>
@@ -162,8 +170,10 @@ interface DshState {
   boot: () => Promise<void>
   refreshSessions: () => Promise<void>
   openSession: (sessionId: string) => Promise<void>
-  createSession: () => Promise<void>
+  createSession: (forceNew?: boolean) => Promise<void>
   addWorkspace: () => Promise<void>
+  renameWorkspace: (workspaceId: string, title: string) => Promise<void>
+  deleteWorkspace: (workspaceId: string) => Promise<void>
   markSessionActive: (sessionId: string) => void
   setNewSessionWorkspace: (workspaceId: string) => void
   setNewSessionAgentPreset: (agentPreset: string) => Promise<void>
@@ -178,6 +188,7 @@ interface DshState {
   renameSession: (sessionId: string, title: string) => Promise<void>
   searchSessions: (query: string) => Promise<SessionSummary[]>
   forkSession: (sessionId: string, atSeq?: number) => Promise<void>
+  loadSubagents: (parentSessionId: string) => Promise<void>
   addPendingInteraction: (request: ServerRequest) => void
   respondToInteraction: (rpcId: string, result: { ok: boolean; value?: unknown; error?: unknown }) => Promise<void>
   handleMuxEvent: (sessionId: string, ev: { type: string; seq: number; time: number; data: unknown }) => void
@@ -193,6 +204,8 @@ export const useDsh = create<DshState>((set, get) => ({
   workspaces: [],
   archivedSessionIds: [],
   agentPresets: [],
+  subagentsByParent: {},
+  settings: null,
   newSessionWorkspaceId: null,
   newSessionAgentPreset: null,
   threadListView: readThreadListView(),
@@ -206,6 +219,7 @@ export const useDsh = create<DshState>((set, get) => ({
   modelCatalogLoading: false,
   currentSessionId: readCurrentSessionId(),
   goal: null,
+  planMode: false,
   contextUsage: undefined,
   queueItems: [],
   queueSessionId: null,
@@ -324,46 +338,88 @@ export const useDsh = create<DshState>((set, get) => ({
     return next
   },
   async openSession(sessionId) {
+    const generation = ++openSessionGeneration
     saveCurrentSessionId(sessionId)
-    set({ currentSessionId: sessionId, permissions: get().sessions.find((session) => session.sessionId === sessionId)?.permissions ?? null, contextUsage: get().sessions.find((session) => session.sessionId === sessionId)?.contextUsage, goal: get().sessions.find((session) => session.sessionId === sessionId)?.goal ?? null, messages: [], loadingHistory: true, error: null })
+    const session = get().sessions.find((item) => item.sessionId === sessionId)
+    set({ currentSessionId: sessionId, permissions: session?.permissions ?? null, contextUsage: session?.contextUsage, goal: session?.goal ?? null, messages: [], loadingHistory: true, error: null, isRunning: session?.running ?? false, planMode: false })
     void get().loadCommands(sessionId)
+    void get().loadSessionModels(sessionId)
+    if (session?.origin === 'subagent' && session.parentSessionId) void get().loadSubagents(session.parentSessionId)
     try {
-      const result = await rpc<{ events: { event: { type: string; seq: number; time: number; data: unknown } }[] }>(
-        'session.history',
-        { sessionId, maxMessages: 200 },
-      )
+      let result: Awaited<ReturnType<typeof rpc<{ events: { event: { type: string; seq: number; time: number; data: unknown } }[]; projections?: { values?: Record<string, unknown> } }>>>
+      if (session?.origin === 'subagent' && session.parentSessionId) {
+        const catalogResult = await rpc<SubagentCatalog>('subagent.list', { parentSessionId: session.parentSessionId })
+        if (generation !== openSessionGeneration || get().currentSessionId !== sessionId) return
+        const entry = catalogResult.ok
+          ? catalogResult.value.entries.find((item) => item.kind === 'child' && item.id === sessionId)
+          : undefined
+        const mode = entry?.kind === 'child' ? entry.mode : session.subagentMode ?? 'one-shot'
+        result = await rpc<{ events: { event: { type: string; seq: number; time: number; data: unknown } }[]; projections?: { values?: Record<string, unknown> } }>('subagent.history', {
+          parentSessionId: session.parentSessionId,
+          childSessionId: sessionId,
+          mode,
+          maxMessages: 200,
+        })
+      } else {
+        result = await rpc<{ events: { event: { type: string; seq: number; time: number; data: unknown } }[]; projections?: { values?: Record<string, unknown> } }>(
+          'session.history',
+          { sessionId, maxMessages: 200 },
+        )
+      }
       if (!result.ok) throw new Error(result.error.message)
+      if (generation !== openSessionGeneration || get().currentSessionId !== sessionId) return
+      const values = result.value.projections?.values
+      const projectionGoal = values?.goal as GoalProjection | null | undefined
+      const projectionPlan = values?.plan as { active?: unknown; pending?: unknown } | undefined
+      if (projectionGoal !== undefined || projectionPlan !== undefined) {
+        set({
+          ...(projectionGoal !== undefined ? { goal: projectionGoal } : {}),
+          ...(projectionPlan !== undefined ? { planMode: projectionPlan.pending === true ? projectionPlan.active !== true : projectionPlan.active === true } : {}),
+        })
+      }
       const events = result.value.events.map((e) => e.event)
       const messages = foldHistory(events)
       const hydrated = await get().hydrateMessageImages(sessionId, messages)
+      if (generation !== openSessionGeneration || get().currentSessionId !== sessionId) return
       set({ messages: hydrated, loadingHistory: false })
     } catch (error) {
+      if (generation !== openSessionGeneration || get().currentSessionId !== sessionId) return
       set({ loadingHistory: false, error: error instanceof Error ? error.message : String(error) })
     }
   },
 
-  async createSession() {
-    const state = get()
-    const workspace = state.workspaces.find((item) => item.workspaceId === state.newSessionWorkspaceId)
-    const reusable = state.sessions.find((session) =>
-      session.blank &&
-      !state.archivedSessionIds.includes(session.sessionId) &&
-      (workspace
-        ? session.cwd === workspace.path && workspace.sessionIds.includes(session.sessionId)
-        : session.cwd === state.host?.cwd),
-    )
-    if (reusable) {
-      await get().openSession(reusable.sessionId)
-      return
-    }
+  async createSession(forceNew = false) {
+    if (createSessionInFlight) return createSessionInFlight
 
-    const result = await rpc<{ sessionId: string }>('session.create', {
-      ...(state.newSessionWorkspaceId ? { workspaceId: state.newSessionWorkspaceId } : {}),
-      ...(state.newSessionAgentPreset ? { agentPreset: state.newSessionAgentPreset } : {}),
-    })
-    if (!result.ok) return
-    await get().refreshSessions()
-    await get().openSession(result.value.sessionId)
+    const operation = (async () => {
+      const state = get()
+      const workspace = state.workspaces.find((item) => item.workspaceId === state.newSessionWorkspaceId)
+      const reusable = forceNew ? undefined : state.sessions.find((session) =>
+        session.blank &&
+        !state.archivedSessionIds.includes(session.sessionId) &&
+        (workspace
+          ? session.cwd === workspace.path && workspace.sessionIds.includes(session.sessionId)
+          : session.cwd === state.host?.cwd),
+      )
+      if (reusable) {
+        await get().openSession(reusable.sessionId)
+        return
+      }
+
+      const result = await rpc<{ sessionId: string }>('session.create', {
+        ...(state.newSessionWorkspaceId ? { workspaceId: state.newSessionWorkspaceId } : {}),
+        ...(state.newSessionAgentPreset ? { agentPreset: state.newSessionAgentPreset } : {}),
+      })
+      if (!result.ok) return
+      await get().refreshSessions()
+      await get().openSession(result.value.sessionId)
+    })()
+    createSessionInFlight = operation
+    try {
+      await operation
+    } finally {
+      if (createSessionInFlight === operation) createSessionInFlight = null
+    }
   },
 
   async addWorkspace() {
@@ -380,6 +436,18 @@ export const useDsh = create<DshState>((set, get) => ({
 
     await get().refreshSessions()
     set({ newSessionWorkspaceId: created.value.workspace.workspaceId })
+  },
+
+  async renameWorkspace(workspaceId, title) {
+    const result = await rpc<{ workspace: WorkspaceView }>('workspace.rename', { workspaceId, title: title.trim() })
+    if (!result.ok) throw new Error(result.error.message)
+    set((state) => ({ workspaces: state.workspaces.map((workspace) => workspace.workspaceId === workspaceId ? result.value.workspace : workspace) }))
+  },
+
+  async deleteWorkspace(workspaceId) {
+    const result = await rpc<{ deleted: true }>('workspace.delete', { workspaceId })
+    if (!result.ok) throw new Error(result.error.message)
+    await get().refreshSessions()
   },
 
   markSessionActive(sessionId) {
@@ -509,6 +577,12 @@ export const useDsh = create<DshState>((set, get) => ({
     await get().openSession(result.value.sessionId)
   },
 
+  async loadSubagents(parentSessionId) {
+    const result = await rpc<SubagentCatalog>('subagent.list', { parentSessionId })
+    if (!result.ok) throw new Error(result.error.message)
+    set((state) => ({ subagentsByParent: { ...state.subagentsByParent, [parentSessionId]: result.value } }))
+  },
+
   setThreadListGroupBy(groupBy) {
     const view = { ...get().threadListView, groupBy }
     saveThreadListView(view)
@@ -532,14 +606,14 @@ export const useDsh = create<DshState>((set, get) => ({
   async createGoal(objective, maxGoalRounds) {
     const sessionId = get().currentSessionId
     if (!sessionId || !objective.trim()) return
-    await goalRpc('goals/create', { sessionId, objective: objective.trim(), ...(maxGoalRounds ? { maxGoalRounds } : {}) })
+    await goalRpc('goal.create', { sessionId, objective: objective.trim(), ...(maxGoalRounds ? { maxGoalRounds } : {}) })
   },
 
   async editGoal(objective, maxGoalRounds) {
     const sessionId = get().currentSessionId
     const goal = get().goal
     if (!sessionId || !goal) return
-    await goalRpc('goals/edit', {
+    await goalRpc('goal.edit', {
       sessionId,
       ref: { id: goal.goal.id, revision: goal.goal.revision },
       ...(objective === undefined ? {} : { objective: objective.trim() }),
@@ -550,25 +624,25 @@ export const useDsh = create<DshState>((set, get) => ({
   async pauseGoal() {
     const sessionId = get().currentSessionId
     const goal = get().goal
-    if (sessionId && goal) await goalRpc('goals/pause', { sessionId, ref: { id: goal.goal.id, revision: goal.goal.revision } })
+    if (sessionId && goal) await goalRpc('goal.pause', { sessionId, ref: { id: goal.goal.id, revision: goal.goal.revision } })
   },
 
   async resumeGoal() {
     const sessionId = get().currentSessionId
     const goal = get().goal
-    if (sessionId && goal) await goalRpc('goals/resume', { sessionId, ref: { id: goal.goal.id, revision: goal.goal.revision } })
+    if (sessionId && goal) await goalRpc('goal.resume', { sessionId, ref: { id: goal.goal.id, revision: goal.goal.revision } })
   },
 
   async completeGoal() {
     const sessionId = get().currentSessionId
     const goal = get().goal
-    if (sessionId && goal) await goalRpc('goals/complete', { sessionId, ref: { id: goal.goal.id, revision: goal.goal.revision } })
+    if (sessionId && goal) await goalRpc('goal.complete', { sessionId, ref: { id: goal.goal.id, revision: goal.goal.revision } })
   },
 
   async clearGoal() {
     const sessionId = get().currentSessionId
     const goal = get().goal
-    if (sessionId && goal) await goalRpc('goals/clear', { sessionId, ref: { id: goal.goal.id, revision: goal.goal.revision } })
+    if (sessionId && goal) await goalRpc('goal.clear', { sessionId, ref: { id: goal.goal.id, revision: goal.goal.revision } })
   },
 
   resolveApproval(approvalId) {
@@ -589,6 +663,10 @@ export const useDsh = create<DshState>((set, get) => ({
     if (sessionId === get().currentSessionId && key === 'goal') {
       set({ goal: value as GoalProjection | null })
     }
+    if (sessionId === get().currentSessionId && key === 'plan') {
+      const plan = value as { active?: unknown; pending?: unknown } | null
+      set({ planMode: plan?.pending === true ? plan.active !== true : plan?.active === true })
+    }
     set({
       projectionsBySession: {
         ...get().projectionsBySession,
@@ -605,15 +683,15 @@ export const useDsh = create<DshState>((set, get) => ({
   },
 
   async onCancelQueueItem(itemId) {
-    const sessionId = get().currentSessionId
-    if (!sessionId) return
+    const sessionId = get().queueSessionId
+    if (!sessionId || sessionId !== get().currentSessionId) return
     const result = await rpc('session.updateQueue', { sessionId, itemId, action: { kind: 'remove' } })
     if (!result.ok) throw new Error(result.error.message)
   },
 
   async onSteerQueueItem(itemId) {
-    const sessionId = get().currentSessionId
-    if (!sessionId) return
+    const sessionId = get().queueSessionId
+    if (!sessionId || sessionId !== get().currentSessionId) return
     const result = await rpc('session.updateQueue', { sessionId, itemId, action: { kind: 'steer' } })
     if (!result.ok) throw new Error(result.error.message)
   },

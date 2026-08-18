@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useRef, type ComponentPropsWithoutRef, type FC } from "react";
+import { forwardRef, memo, useEffect, useRef, type ComponentPropsWithoutRef, type FC } from "react";
 import {
   ComposerPrimitive,
   unstable_defaultDirectiveFormatter,
@@ -132,19 +132,33 @@ const Items: FC<ItemsProps> = ({
   loadingLabel,
 }) => {
   const { isLoading } = unstable_useTriggerPopoverScopeContext();
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const scrollHighlighted = () => {
+      const highlighted = Array.from(list.querySelectorAll<HTMLElement>("[data-highlighted]"))
+        .find((element) => element.getAttribute("data-highlighted") !== "false");
+      highlighted?.scrollIntoView({ block: "nearest" });
+    };
+    const observer = new MutationObserver(scrollHighlighted);
+    observer.observe(list, { subtree: true, attributes: true, attributeFilter: ["data-highlighted"] });
+    scrollHighlighted();
+    return () => observer.disconnect();
+  }, []);
   return (
-    <ComposerPrimitive.Unstable_TriggerPopoverItems>
+    <ComposerPrimitive.Unstable_TriggerPopoverItems className="min-h-0 flex-1 overflow-hidden">
       {(items) => (
         <div
           data-slot="composer-trigger-popover-items"
-          className="flex flex-col"
+          className="flex max-h-[min(70vh,32rem)] min-h-0 flex-col overflow-hidden"
         >
           <ComposerPrimitive.Unstable_TriggerPopoverBack className="text-muted-foreground hover:bg-accent flex cursor-pointer items-center gap-1.5 border-b px-3 py-2 text-xs tracking-wide uppercase transition-colors">
             <ChevronLeftIcon className="size-3.5" />
             {backLabel}
           </ComposerPrimitive.Unstable_TriggerPopoverBack>
 
-          <div className="py-1">
+          <div ref={listRef} className="min-h-0 max-h-full overflow-y-auto overscroll-contain py-1">
             {items.map((item, index) => {
               const iconKey =
                 typeof item.metadata?.icon === "string"
@@ -186,7 +200,10 @@ const Items: FC<ItemsProps> = ({
  * Pre-built popover UI for a trigger-driven picker (mentions, slash commands, etc).
  * Pass exactly one of `directive` (inserts a chip) or `action` (fires a handler).
  */
-const ComposerTriggerPopoverImpl: FC<ComposerTriggerPopoverProps> = ({
+const ComposerTriggerPopoverImpl = forwardRef<
+  HTMLDivElement,
+  ComposerTriggerPopoverProps
+>(({
   iconMap,
   fallbackIcon = SparklesIcon,
   backLabel = "Back",
@@ -197,7 +214,7 @@ const ComposerTriggerPopoverImpl: FC<ComposerTriggerPopoverProps> = ({
   directive,
   action,
   ...props
-}) => {
+}, ref) => {
   const warnedRef = useRef(false);
   if (
     process.env.NODE_ENV !== "production" &&
@@ -212,9 +229,10 @@ const ComposerTriggerPopoverImpl: FC<ComposerTriggerPopoverProps> = ({
 
   return (
     <ComposerPrimitive.Unstable_TriggerPopover
+      ref={ref}
       data-slot="composer-trigger-popover"
       className={cn(
-        "aui-composer-trigger-popover bg-popover text-popover-foreground absolute start-0 bottom-full z-50 mb-2 w-64 overflow-hidden rounded-xl border shadow-lg",
+        "aui-composer-trigger-popover bg-popover text-popover-foreground absolute start-0 bottom-full z-50 mb-2 flex max-h-[min(70vh,32rem)] w-64 flex-col overflow-hidden rounded-xl border shadow-lg",
         className,
       )}
       {...props}
@@ -245,9 +263,7 @@ const ComposerTriggerPopoverImpl: FC<ComposerTriggerPopoverProps> = ({
       />
     </ComposerPrimitive.Unstable_TriggerPopover>
   );
-};
+});
 ComposerTriggerPopoverImpl.displayName = "ComposerTriggerPopover";
 
-export const ComposerTriggerPopover = memo(
-  ComposerTriggerPopoverImpl,
-) as FC<ComposerTriggerPopoverProps>;
+export const ComposerTriggerPopover = memo(ComposerTriggerPopoverImpl);

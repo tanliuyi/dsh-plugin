@@ -28,6 +28,7 @@ import {
 } from "@assistant-ui/react";
 import {
   ArchiveIcon,
+  CircleAlertIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   FolderIcon,
@@ -543,7 +544,8 @@ const ThreadListSkeleton: FC = () => {
 };
 
 export const ThreadListItem: FC = () => {
-  const isRunning = useAuiState((s) => s.threadListItem.isRunning);
+  const isPendingRequest = useAuiState((s) => s.threadListItem.custom?.hasPendingRequest === true);
+  const isRunning = useAuiState((s) => s.threadListItem.custom?.running === true);
   const threadId = useAuiState((s) => s.threadListItem.id);
   const currentSessionId = useDsh((s) => s.currentSessionId);
   const isActive = currentSessionId === threadId;
@@ -562,7 +564,7 @@ export const ThreadListItem: FC = () => {
       data-slot="aui_thread-list-item"
       data-active={isActive ? "true" : undefined}
       aria-current={isActive ? "true" : undefined}
-      className="group hover:bg-muted focus-visible:bg-muted data-active:bg-muted has-focus-visible:bg-muted has-data-[state=open]:bg-muted relative flex h-8 items-center rounded-md transition-colors focus-visible:outline-none"
+      className="group ps-4 hover:bg-muted focus-visible:bg-muted data-active:bg-muted has-focus-visible:bg-muted has-data-[state=open]:bg-muted relative flex h-8 items-center rounded-md transition-colors focus-visible:outline-none"
     >
       {isRenaming ? (
         <ThreadListItemRename
@@ -577,7 +579,14 @@ export const ThreadListItem: FC = () => {
           data-slot="aui_thread-list-item-trigger"
           className="focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center rounded-md px-2.5 text-start text-sm outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 focus-visible:ring-[3px]"
         >
-          {isRunning && (
+          {isPendingRequest && (
+            <CircleAlertIcon
+              aria-hidden
+              data-slot="aui_thread-list-item-pending-request"
+              className="text-warning me-1.5 size-3.5 shrink-0"
+            />
+          )}
+          {!isPendingRequest && isRunning && (
             <Loader2Icon
               aria-hidden
               data-slot="aui_thread-list-item-running"
@@ -590,7 +599,11 @@ export const ThreadListItem: FC = () => {
           >
             <ThreadListItemPrimitive.Title fallback="New Chat" />
           </span>
-          {isRunning && <span className="sr-only">Running</span>}
+          {isPendingRequest ? (
+            <span className="sr-only">Request needs attention</span>
+          ) : isRunning ? (
+            <span className="sr-only">Running</span>
+          ) : null}
         </ThreadListItemPrimitive.Trigger>
       )}
       <ThreadListItemMore onRename={() => setIsRenaming(true)} isActive={isActive} />

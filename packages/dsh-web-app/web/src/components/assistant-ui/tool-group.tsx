@@ -107,7 +107,7 @@ function ToolGroupTrigger({
     <CollapsibleTrigger
       data-slot="tool-group-trigger"
       className={cn(
-        "aui-tool-group-trigger group/trigger flex origin-left items-center gap-2 text-sm transition-[color,scale] active:scale-[0.98]",
+        "aui-tool-group-trigger group/trigger flex origin-left items-center gap-2 transition-[color,scale] active:scale-[0.98]",
         "group-data-[variant=ghost]/tool-group-root:text-muted-foreground group-data-[variant=ghost]/tool-group-root:hover:text-foreground group-data-[variant=ghost]/tool-group-root:py-1.5",
         "group-data-[variant=outline]/tool-group-root:w-full group-data-[variant=outline]/tool-group-root:px-4",
         "group-data-[variant=muted]/tool-group-root:w-full group-data-[variant=muted]/tool-group-root:px-4",
@@ -135,7 +135,7 @@ function ToolGroupTrigger({
           <span
             aria-hidden
             data-slot="tool-group-trigger-shimmer"
-            className="aui-tool-group-trigger-shimmer shimmer pointer-events-none absolute inset-0 text-xs motion-reduce:animate-none"
+            className="aui-tool-group-trigger-shimmer shimmer pointer-events-none absolute inset-0 text-md motion-reduce:animate-none"
           >
             {label}
           </span>
@@ -164,7 +164,7 @@ function ToolGroupContent({
     <CollapsibleContent
       data-slot="tool-group-content"
       className={cn(
-        "aui-tool-group-content relative overflow-hidden text-sm outline-none",
+        "aui-tool-group-content relative overflow-hidden outline-none",
         "group/collapsible-content ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:animate-none",
         "data-closed:animate-collapsible-up",
         "data-open:animate-collapsible-down",

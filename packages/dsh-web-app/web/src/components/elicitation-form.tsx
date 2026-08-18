@@ -1,19 +1,31 @@
 "use client";
 
 import type { ComponentProps } from "react";
-import { CheckIcon, PlugIcon, XIcon } from "lucide-react";
+import { CheckIcon, PencilIcon, PlugIcon, XIcon } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { field, inkButton, mono, paper } from "@/lib/surfaces";
 
 export type ElicitationState = "request" | "accepted" | "declined";
 
+export interface ElicitationOption {
+  value: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+}
+
 export interface ElicitationField {
   name: string;
   label: string;
   value: string;
+  customValue?: string;
   selected?: readonly string[];
   kind: "text" | "choice" | "toggle";
-  options?: readonly string[];
+  options?: readonly ElicitationOption[];
+  multiSelect?: boolean;
+  allowCustom?: boolean;
+  customPlaceholder?: string;
   required?: boolean;
 }
 
@@ -25,6 +37,7 @@ export function ElicitationForm({
   onAccept,
   onDecline,
   onFieldChange,
+  onCustomChange,
   className,
   ...props
 }: Omit<
@@ -45,13 +58,14 @@ export function ElicitationForm({
   onAccept?: () => void;
   onDecline?: () => void;
   onFieldChange?: (name: string, value: string) => void;
+  onCustomChange?: (name: string, value: string) => void;
 }) {
   return (
     <div
       data-slot="elicitation-form"
       className={cn(
         paper,
-        "flex w-full max-w-sm flex-col gap-3.5 rounded-[20px] p-4",
+        "flex w-full flex-col gap-3.5 rounded-[20px] p-4",
         className,
       )}
 
@@ -80,21 +94,59 @@ export function ElicitationForm({
             </span>
             {item.kind === "choice" ? (
               <div className="flex flex-wrap gap-1.5">
-                {item.options?.map((option) => (
+                {item.options?.map((option, optionIndex) => (
                   <button
-                    key={option}
+                    key={`${option.value}-${optionIndex}`}
                     type="button"
-                    onClick={() => onFieldChange?.(item.name, option)}
+                    onClick={() => onFieldChange?.(item.name, option.value)}
                     className={cn(
-                      "rounded-full px-2.5 py-1 text-xs transition-colors",
-                      item.selected?.includes(option) || option === item.value
+                      "flex w-full items-start gap-2 rounded-xl px-3 py-2 text-left text-xs transition-colors",
+                      item.selected?.includes(option.value)
                         ? "bg-foreground text-background"
                         : cn(field, "text-foreground/55"),
                     )}
                   >
-                    {option}
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5">
+                        <span>{option.label}</span>
+                        {option.recommended ? (
+                          <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">
+                            推荐
+                          </span>
+                        ) : null}
+                      </span>
+                      {option.description ? (
+                        <span className="mt-0.5 block text-[11px] opacity-70">
+                          {option.description}
+                        </span>
+                      ) : null}
+                    </span>
+                    {item.multiSelect ? (
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border",
+                          item.selected?.includes(option.value)
+                            ? "border-current"
+                            : "border-current/30",
+                        )}
+                      >
+                        {item.selected?.includes(option.value) ? <CheckIcon className="size-3" /> : null}
+                      </span>
+                    ) : null}
                   </button>
                 ))}
+                {item.allowCustom ? (
+                  <div className={cn(field, "flex w-full min-w-0 items-center gap-2 rounded-xl px-3 py-2", item.customValue && "ring-1 ring-ring")}>
+                    <PencilIcon className="text-muted-foreground size-3.5 shrink-0" />
+                    <Input
+                      value={item.customValue ?? ""}
+                      onChange={(event) => onCustomChange?.(item.name, event.target.value)}
+                      placeholder={item.customPlaceholder ?? "Custom answer"}
+                      className="h-6 w-full min-w-0 flex-1 border-0 bg-transparent p-0 text-xs shadow-none focus-visible:ring-0"
+                    />
+                  </div>
+                ) : null}
               </div>
             ) : item.kind === "toggle" ? (
               <button
@@ -123,9 +175,9 @@ export function ElicitationForm({
                 </span>
               </button>
             ) : (
-              <input
-                value={item.value}
-                onChange={(event) => onFieldChange?.(item.name, event.target.value)}
+              <Input
+                value={item.customValue ?? item.value}
+                onChange={(event) => onCustomChange?.(item.name, event.target.value)}
                 className={cn(
                   field,
                   "text-foreground/80 rounded-lg px-2.5 py-1.5 text-xs outline-none",

@@ -56,6 +56,10 @@ export type ModelOption = {
    * low/medium/high levels, or a custom list. Omit for models without
    * configurable reasoning.
    */
+  /** Provider and model IDs are kept separate for session.selectModel. */
+  provider?: string;
+  model?: string;
+  defaultEffort?: string;
   /** Optional provider label used to render grouped model directories. */
   group?: string;
   efforts?: boolean | readonly ModelSelectorEffortOption[];

@@ -7,12 +7,15 @@ import {
   MarkdownTextPrimitive,
   unstable_memoizeMarkdownComponents as memoizeMarkdownComponents,
   useIsMarkdownCodeBlock,
+  type SyntaxHighlighterProps,
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
 import { type FC, memo, useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { CodeDiff } from "@/components/elements/code-diff";
+import { parseUnifiedDiff } from "@/lib/unified-diff";
 import { cn } from "@/lib/utils";
 
 const MarkdownTextImpl = () => {
@@ -20,13 +23,43 @@ const MarkdownTextImpl = () => {
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm]}
       className="aui-md"
-      components={defaultComponents}
+      components={markdownComponents}
+      componentsByLanguage={{
+        diff: {
+          SyntaxHighlighter: DiffSyntaxHighlighter,
+        },
+      }}
       defer
     />
   );
 };
 
 export const MarkdownText = memo(MarkdownTextImpl);
+
+/**
+ * ```diff 代码块 → assistant-ui CodeDiff 元素。解析失败/内容非法时退回
+ * 默认代码块渲染（返回 null 用默认高亮器）。
+ */
+const DiffSyntaxHighlighter: FC<SyntaxHighlighterProps> = memo(
+  ({ code, components }: SyntaxHighlighterProps) => {
+    const diff = parseUnifiedDiff(code, 0);
+    if (!diff) {
+      // 解析失败时回退到默认代码块渲染，避免内容丢失。
+      const { Pre, Code } = components;
+      return (
+        <Pre>
+          <Code>{code}</Code>
+        </Pre>
+      );
+    }
+    return (
+      <div data-slot="aui_markdown-diff" className="my-1">
+        <CodeDiff {...diff} className="max-w-none" />
+      </div>
+    );
+  },
+);
+DiffSyntaxHighlighter.displayName = "DiffSyntaxHighlighter";
 
 const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   const { isCopied, copyToClipboard } = useCopyToClipboard();
@@ -76,7 +109,12 @@ const useCopyToClipboard = ({
   return { isCopied, copyToClipboard };
 };
 
-const defaultComponents = memoizeMarkdownComponents({
+/**
+ * 共享 markdown 组件/样式表：消息体（MarkdownText）与静态渲染器
+ * （MarkdownStatic，见 markdown-static.tsx）复用同一套组件与 class，
+ * 保证计划审阅的 markdown 与助手消息渲染一致。
+ */
+export const markdownComponents = memoizeMarkdownComponents({
   h1: ({ className, ...props }) => (
     <h1
       className={cn(

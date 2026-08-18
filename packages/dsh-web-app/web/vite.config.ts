@@ -11,6 +11,7 @@ export default defineConfig({
   root: src('.'),
   base: '/',
   resolve: {
+    dedupe: ['react', 'react-dom'],
     alias: {
       '@': src('src'),
     },
@@ -25,13 +26,13 @@ export default defineConfig({
     // 本地开发：代理 /api 到独立 profile（dsh wui）。
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:3090',
+        target: 'http://127.0.0.1:3080',
         changeOrigin: true,
         ws: true,
         configure(proxy) {
           const rewriteTrustHeaders = (proxyReq: { setHeader(name: string, value: string): void }) => {
-            proxyReq.setHeader('host', '127.0.0.1:3090')
-            proxyReq.setHeader('origin', 'http://127.0.0.1:3090')
+            proxyReq.setHeader('host', '127.0.0.1:3080')
+            proxyReq.setHeader('origin', 'http://127.0.0.1:3080')
           }
           proxy.on('proxyReq', rewriteTrustHeaders)
           proxy.on('proxyReqWs', rewriteTrustHeaders)

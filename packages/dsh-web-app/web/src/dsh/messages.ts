@@ -2,6 +2,8 @@
 
 export type DshMessagePart =
   | { type: 'text'; text: string }
+  | /** 活跃 turn 中注入的用户输入（上游 SteeringMessageNode）：紧凑独立行，不是 user 气泡。 */
+  { type: 'steering'; text: string }
   | { type: 'image'; attachmentId: string; mediaType?: string; name?: string; src?: string }
   | { type: 'reasoning'; text: string }
   | {
@@ -16,11 +18,28 @@ export type DshMessagePart =
   }
   /** 模型可见但用户弱化的上下文注入（runtime context、skill 目录等），折叠显示。 */
   | { type: 'context'; label: string; text: string }
+  | {
+    type: 'command'
+    commandId: string
+    name: string | null
+    args: string | null
+    outcome: null | { kind: 'success' | 'error'; text?: string; sourceEventSeq?: number }
+  }
+
+export interface FoldableSessionEvent {
+  type: string
+  seq: number
+  time: number
+  data: unknown
+  surfaceOp?: unknown
+  ignorable?: boolean
+}
 
 export interface DshMessage {
   /** 稳定 id：优先取 wire 上的 messageId/callId，否则用事件 seq。 */
   id: string
-  role: 'user' | 'assistant'
+  /** steering：被 next-step inbox claim 的 user 输入，渲染为独立 steering 行。 */
+  role: 'user' | 'assistant' | 'steering'
   parts: DshMessagePart[]
   createdAt?: number
   /** wire 事件 seq（组装顺序依据）。 */
@@ -79,9 +98,6 @@ function messageIdOf(data: Record<string, unknown> | undefined, fallback: string
   return candidate ?? fallback
 }
 
-/** 上下文注入摘要上限（与官方 CONTEXT_SUMMARY_MAX_CHARS 同语义）。 */
-const CONTEXT_SUMMARY_MAX_CHARS = 120
-
 function contentBlocksOf(data: Record<string, unknown> | undefined): Record<string, unknown>[] {
   if (!data) return []
   const content = data.content ?? (data.message as Record<string, unknown> | undefined)?.content
@@ -105,17 +121,26 @@ function imagePartsOf(data: Record<string, unknown> | undefined): DshMessagePart
 }
 
 
+function collectedLabels(source: Record<string, unknown>, member: string, field: string): string[] {
+  const values = source[member]
+  if (!Array.isArray(values)) return []
+  const labels: string[] = []
+  for (const value of values) {
+    if (typeof value !== 'object' || value === null) continue
+    const label = (value as Record<string, unknown>)[field]
+    if (typeof label === 'string' && label !== '' && !labels.includes(label)) labels.push(label)
+  }
+  return labels
+}
+
 function contextLabel(source: Record<string, unknown>): string {
-  const kind = String(source.kind ?? 'unknown')
+  const kind = typeof source.kind === 'string' && source.kind !== '' ? source.kind : 'unknown'
   switch (kind) {
-    case 'plugin': return String(source.plugin ?? kind)
-    case 'skill-invocation': return String(source.name ?? kind)
-    case 'agent-instructions':
-      return kind
-    case 'session-reference':
-      return kind
-    default:
-      return kind
+    case 'plugin': return typeof source.plugin === 'string' && source.plugin !== '' ? source.plugin : kind
+    case 'skill-invocation': return typeof source.name === 'string' && source.name !== '' ? source.name : kind
+    case 'agent-instructions': return collectedLabels(source, 'changes', 'path').join(', ') || kind
+    case 'session-reference': return collectedLabels(source, 'references', 'label').join(', ') || kind
+    default: return kind
   }
 }
 
@@ -185,16 +210,22 @@ function finalizedAssistantMessage(messages: DshMessage[], data: Record<string, 
   return result
 }
 
-/** 递增组装：把一条新事件并入已有消息列表。返回 { messages, isRunning } 或 null（忽略）。 */
+/** 递增组装：把一条新事件并入已有消息列表。返回 { messages, isRunning } 或 null（忽略）。
+ *  可选 claimed 为上游 inbox 的 next-step claimed 集合：source.kind=user 且 id 被 claim
+ *  的 user/message 折叠为 steering 节点（非 user 气泡）。 */
 export function foldEvent(
   messages: DshMessage[],
-  ev: { type: string; seq: number; time: number; data: unknown },
+  ev: FoldableSessionEvent,
+  claimed?: ReadonlySet<string>,
 ): { messages: DshMessage[]; isRunning?: boolean } | null {
   const data = (ev.data ?? {}) as Record<string, unknown>
   const base = { seq: ev.seq, createdAt: ev.time }
 
   switch (ev.type) {
     case 'user/message': {
+      // Replacement copies are model-surface checkpoints (for example manual
+      // compaction), not new human transcript entries.
+      if (ev.surfaceOp !== undefined && ev.surfaceOp !== 'append') return null
       const text = textOf(data)
       const images = imagePartsOf(data)
       if (!text && images.length === 0) return null
@@ -203,18 +234,27 @@ export function foldEvent(
       // agent-instructions、session-reference…）是模型可见的上下文注入，折叠渲染。
       if (source.kind !== 'user') {
         const label = contextLabel(source)
-        const summary = text.length > CONTEXT_SUMMARY_MAX_CHARS
-          ? `${text.slice(0, CONTEXT_SUMMARY_MAX_CHARS - 1)}…`
-          : text
         const msg: DshMessage = {
           id: `ctx-${ev.seq}`,
           role: 'assistant',
-          parts: [{ type: 'context', label, text: summary }],
+          parts: [{ type: 'context', label, text }],
           ...base,
         }
         return { messages: [...messages, msg] }
       }
-      if (source.kind === 'user' && /^\/permission\s+[^\s]+\s*$/.test(text.trim())) return null
+      // 上游 steering 分类：只是 append surface 还不够——如果一个 user id 曾经被
+      // next-step inbox 的 splice 移除（且 outcome != canceled）claim 过，这条
+      // user/message 是「注入活跃 turn 的 steering」，不渲染为普通 user 气泡。
+      const claimedId = String((data.id ?? data.messageId ?? data.rpcId) ?? '')
+      if (claimed !== undefined && claimed.has(claimedId)) {
+        const msg: DshMessage = {
+          id: messageIdOf(data, `s-${ev.seq}`),
+          role: 'steering',
+          parts: [...(text ? [{ type: 'steering' as const, text }] : []), ...images],
+          ...base,
+        }
+        return { messages: [...messages, msg] }
+      }
       const msg: DshMessage = { id: messageIdOf(data, `u-${ev.seq}`), role: 'user', parts: [...(text ? [{ type: 'text' as const, text }] : []), ...images], ...base }
       if (msg.parts.length === 0) return null
       return { messages: [...messages, msg] }
@@ -223,6 +263,7 @@ export function foldEvent(
       return { messages: applyAssistantChunk(messages, data, base), isRunning: true }
     }
     case 'assistant/message': {
+      if (ev.surfaceOp !== undefined && ev.surfaceOp !== 'append') return null
       const parts = [...assistantPartsOf(data), ...imagePartsOf(data)]
       // assistant/message can be an intermediate step before another tool call;
       // only turn/end or host/session-status is authoritative for completion.
@@ -278,18 +319,159 @@ export function foldEvent(
       return { messages, isRunning: true }
     case 'turn/end':
       return { messages, isRunning: false }
+    case 'command/run': {
+      const commandId = String(data.commandId ?? `c-${ev.seq}`)
+      const msg: DshMessage = {
+        id: `cmd-${commandId}`,
+        role: 'assistant',
+        parts: [{
+          type: 'command',
+          commandId,
+          name: typeof data.name === 'string' ? data.name : null,
+          args: typeof data.args === 'string' ? data.args : null,
+          outcome: null,
+        }],
+        ...base,
+      }
+      const existing = messages.findIndex((message) => message.id === msg.id)
+      if (existing < 0) return { messages: [...messages, msg] }
+      const next = [...messages]
+      next[existing] = msg
+      return { messages: next }
+    }
+    case 'command/done': {
+      const commandId = String(data.commandId ?? `c-${ev.seq}`)
+      const id = `cmd-${commandId}`
+      const existingIndex = messages.findIndex((message) => message.id === id)
+      const existing = existingIndex < 0 ? undefined : messages[existingIndex]
+      const previous = existing?.parts.find((part) => part.type === 'command')
+      const sourceEventSeq = typeof data.sourceEventSeq === 'number' && Number.isSafeInteger(data.sourceEventSeq) && data.sourceEventSeq >= 0
+        ? data.sourceEventSeq
+        : undefined
+      const command: DshMessagePart = {
+        type: 'command',
+        commandId,
+        name: previous?.type === 'command' ? previous.name : null,
+        args: previous?.type === 'command' ? previous.args : null,
+        outcome: {
+          kind: data.kind === 'error' ? 'error' : 'success',
+          ...(typeof data.text === 'string' ? { text: data.text } : {}),
+          ...(sourceEventSeq === undefined ? {} : { sourceEventSeq }),
+        },
+      }
+      const msg: DshMessage = {
+        id,
+        role: 'assistant',
+        parts: [command],
+        seq: existing?.seq ?? ev.seq,
+        createdAt: existing?.createdAt ?? ev.time,
+      }
+      if (existingIndex < 0) return { messages: [...messages, msg] }
+      const next = [...messages]
+      next[existingIndex] = msg
+      return { messages: next }
+    }
     default:
-      // compaction、steering、command 等：骨架阶段忽略。
+      // compaction、steering 等：骨架阶段忽略。
       return null
   }
 }
 
-/** 把历史事件列表组装为初始消息列表（按 seq 升序 fold）。 */
-export function foldHistory(events: { type: string; seq: number; time: number; data: unknown }[]): DshMessage[] {
-  let messages: DshMessage[] = []
-  for (const ev of events) {
-    const folded = foldEvent(messages, ev)
-    if (folded) messages = folded.messages
+/** next-step inbox 累积状态（上游 InboxState 的本地等价）：pending 队列 + claimed 集合。 */
+export interface InboxFoldState {
+  readonly pending: readonly { readonly id: string }[]
+  readonly claimed: ReadonlySet<string>
+}
+
+interface InboxSpliceRecord {
+  target?: unknown
+  start?: unknown
+  removedCount?: unknown
+  inserted?: unknown
+  outcome?: unknown
+}
+
+/** 应用一次 agent/inbox/spliced（上游 inbox.ts applySplice）：
+ *  - removed 从 pending 移除、inserted 原位插入；
+ *  - inserted 的 id 从 claimed 清除（被重新入队 = 不再是本步已 claim 的输入）；
+ *  - target=next-step 且 outcome != canceled 时，removed 的 id 加入 claimed。
+ *  只维护 next-step 的 pending/claimed（steering 判定唯一依赖它），其余 target 忽略。 */
+function applyInboxSplice(previous: InboxFoldState | undefined, data: unknown): InboxFoldState {
+  const pending = [...(previous?.pending ?? [])]
+  const claimed = new Set(previous?.claimed)
+  const splice = (data ?? {}) as InboxSpliceRecord
+  if (splice.target !== 'next-step') return { pending, claimed }
+  const start = typeof splice.start === 'number' && splice.start >= 0 ? splice.start : pending.length
+  const removedCount = typeof splice.removedCount === 'number' && splice.removedCount >= 0 ? splice.removedCount : 0
+  const inserted = Array.isArray(splice.inserted)
+    ? splice.inserted.filter((item): item is { readonly id: string } => {
+      if (typeof item !== 'object' || item === null) return false
+      return typeof (item as { id?: unknown }).id === 'string'
+    })
+    : []
+  const removed = pending.splice(start, removedCount, ...inserted)
+  for (const identity of inserted) claimed.delete(identity.id)
+  if (splice.outcome !== 'canceled') {
+    for (const identity of removed) claimed.add(identity.id)
   }
-  return messages
+  return { pending, claimed }
+}
+
+/** 会话级状态化 fold：把事件流折成 DshMessage[]，同时维护 next-step inbox 的
+ *  pending/claimed 用于 steering 分类，并按 seq 去重（history 重放与 live 增量共用
+ *  同一状态，steering 判定一致）。
+ *
+ *  每个 session 一个实例：openSession 新建 / removeSessionState 清理 / reopen 重建，
+ *  不使用模块级共享可变状态，避免 session 间与测试间互相污染。 */
+export class ConversationFold {
+  private messages: DshMessage[] = []
+  private inbox: InboxFoldState = { pending: [], claimed: new Set() }
+  private seen = new Set<number>()
+  private lastFoldedSeq = -1
+
+  /** 当前 next-step inbox 状态（claimed 用于 steering 判定）。 */
+  get inboxState(): Readonly<InboxFoldState> {
+    return this.inbox
+  }
+
+  /** 已 fold 的最大事件 seq（未 fold 任何事件时为 -1）。 */
+  get lastSeq(): number {
+    return this.lastFoldedSeq
+  }
+
+  getMessages(): DshMessage[] {
+    return this.messages
+  }
+
+  /** 用外部替换的消息列表（如 image hydration 后的副本）回写内部基线，
+   *  后续 fold 从该列表继续，避免重复 hydration。 */
+  applyMessages(messages: DshMessage[]): void {
+    this.messages = messages
+  }
+
+  /** 折入一条事件（按 seq 去重；重复事件返回 null 且不改变状态）。 */
+  fold(ev: FoldableSessionEvent): { messages: DshMessage[]; isRunning?: boolean } | null {
+    if (this.seen.has(ev.seq)) return null
+    this.seen.add(ev.seq)
+    if (ev.seq > this.lastFoldedSeq) this.lastFoldedSeq = ev.seq
+    if (ev.type === 'agent/inbox/spliced') {
+      this.inbox = applyInboxSplice(this.inbox, ev.data)
+      return null
+    }
+    const folded = foldEvent(this.messages, ev, this.inbox.claimed)
+    if (!folded) return null
+    this.messages = folded.messages
+    return {
+      messages: this.messages,
+      ...(folded.isRunning === undefined ? {} : { isRunning: folded.isRunning }),
+    }
+  }
+}
+
+/** 把历史事件列表组装为初始消息列表（按 seq 升序 fold、按 seq 去重）。
+ *  用独立 ConversationFold 实例重放，steering 分类与活更新一致。 */
+export function foldHistory(events: FoldableSessionEvent[]): DshMessage[] {
+  const folder = new ConversationFold()
+  for (const ev of [...events].sort((left, right) => left.seq - right.seq)) folder.fold(ev)
+  return folder.getMessages()
 }

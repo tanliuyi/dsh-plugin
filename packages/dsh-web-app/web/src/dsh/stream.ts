@@ -1,6 +1,6 @@
 /** Upstream-compatible WebSocket downlink connection manager. */
 
-import { type JobView, type QueueMessage, type ServerRequest } from './api'
+import { type JobView, type QueueMessage, type ServerRequest, type WorkspaceView } from './api'
 import { useDsh } from './store'
 
 function wsUrl(path: string): string {
@@ -13,12 +13,13 @@ type JsonRecord = Record<string, unknown>
 interface MuxFrame {
   type: string
   sessionId?: string
-  event?: { type: string; seq: number; time: number; data: unknown }
+  event?: { type: string; seq: number; time: number; data: unknown; surfaceOp?: unknown; ignorable?: boolean }
   questionRpcId?: string
   questions?: unknown[]
   approvalId?: string
   error?: { message?: string }
   items?: Array<{ id: string; placement: QueueMessage['placement']; message?: { content?: Array<{ type?: string; text?: string }> } }>
+  lastSeq?: number
   jobs?: JobView[]
   key?: string
   value?: unknown
@@ -46,6 +47,8 @@ function isMuxFrame(value: unknown): value is MuxFrame {
     value.type === 'session/queue' ||
     value.type === 'session/jobs' ||
     value.type === 'session/projection' ||
+    value.type === 'llm/adapters-updated' ||
+    value.type === 'settings/document-updated' ||
     value.type === 'stream/error'
   )
 }
@@ -58,6 +61,7 @@ function isHostFrame(value: unknown): value is HostFrame {
 
 let started = false
 let generation = 0
+let reconnectAttempt = 0
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 
 /** Open both downlinks as one generation, matching the upstream client contract. */
@@ -75,7 +79,16 @@ function startGeneration(): void {
   let retryScheduled = false
   const sockets: WebSocket[] = []
 
-  store.setState({ connected: false })
+  store.setState({
+    connected: false,
+    modelRoutable: null,
+    modelCatalogSessionId: null,
+    modelCatalogGroups: [],
+    modelCatalog: [],
+    selectedProvider: null,
+    selectedModel: null,
+    selectedReasoningEffort: undefined,
+  })
 
   const failGeneration = (): void => {
     if (currentGeneration !== generation) return
@@ -85,16 +98,24 @@ function startGeneration(): void {
     }
     if (retryScheduled) return
     retryScheduled = true
+    const base = Math.min(10_000, 500 * 2 ** reconnectAttempt)
+    reconnectAttempt += 1
+    const delay = Math.round(base * (0.8 + Math.random() * 0.4))
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined
       if (currentGeneration === generation) startGeneration()
-    }, 1000)
+    }, delay)
   }
 
   const markReady = (kind: 'mux' | 'host'): void => {
     if (kind === 'mux') muxReady = true
     else hostReady = true
-    if (muxReady && hostReady && currentGeneration === generation) store.setState({ connected: true })
+    if (muxReady && hostReady && currentGeneration === generation) {
+      reconnectAttempt = 0
+      store.setState({ connected: true })
+      const sessionId = store.getState().currentSessionId
+      if (sessionId) void store.getState().loadSessionModels(sessionId)
+    }
   }
 
   const handleMux = (payload: unknown, request?: ServerRequest): void => {
@@ -107,7 +128,10 @@ function startGeneration(): void {
       store.getState().addPendingInteraction({ ...request, payload })
       return
     }
-    if (payload.type === 'session/event' && payload.sessionId && payload.event && typeof payload.event.seq === 'number') {
+    if (payload.type === 'session/subscribed' && payload.sessionId && typeof payload.lastSeq === 'number') {
+      // 对齐该 session 的 event watermark 与新 generation baseline，并按需受控 resync。
+      store.getState().handleSubscribed(payload.sessionId, payload.lastSeq, currentGeneration)
+    } else if (payload.type === 'session/event' && payload.sessionId && payload.event && typeof payload.event.seq === 'number') {
       store.getState().handleMuxEvent(payload.sessionId, payload.event)
     } else if (payload.type === 'approval/resolved' && typeof payload.approvalId === 'string') {
       store.getState().resolveApproval(payload.approvalId)
@@ -123,8 +147,11 @@ function startGeneration(): void {
       store.getState().setJobsSnapshot(payload.sessionId, payload.jobs)
     } else if (payload.type === 'session/projection' && payload.sessionId && typeof payload.key === 'string' && typeof payload.seq === 'number') {
       store.getState().setProjection(payload.sessionId, payload.key, payload.value, payload.seq)
+    } else if (payload.type === 'llm/adapters-updated' || payload.type === 'settings/document-updated') {
+      const sessionId = store.getState().currentSessionId
+      if (sessionId) void store.getState().loadSessionModels(sessionId)
     } else if (payload.type === 'stream/error') {
-      store.setState({ error: payload.error?.message ?? 'stream error' })
+      failGeneration()
     }
   }
 
@@ -134,30 +161,68 @@ function startGeneration(): void {
       return
     }
     if (!isHostFrame(payload)) return
-    if (payload.type === 'host/session-status' && typeof payload.sessionId === 'string' && typeof payload.running === 'boolean') {
-      const sessionId = payload.sessionId
-      const running = payload.running
-      store.setState((state) => ({
-        sessions: state.sessions.map((session) => session.sessionId === sessionId ? { ...session, running } : session),
-        ...(state.currentSessionId === sessionId ? { isRunning: running } : {}),
-      }))
+    const type = payload.type
+    if (type === 'stream/error') {
+      failGeneration()
       return
     }
-    if (payload.type === 'host/agent-error' && typeof payload.message === 'string') {
+    if (type === 'host/session-status' && typeof payload.sessionId === 'string' && typeof payload.running === 'boolean') {
+      const sessionId = payload.sessionId
+      const running = payload.running
+      store.getState().setSessionRunning(sessionId, running)
+      return
+    }
+    if (type === 'host/agent-error' && typeof payload.message === 'string') {
       store.setState({ error: payload.message })
       return
     }
-    if (payload.type === 'host/session-removed' && typeof payload.sessionId === 'string') {
-      store.setState((state) => ({
-        sessions: state.sessions.filter((session) => session.sessionId !== payload.sessionId),
-        ...(state.currentSessionId === payload.sessionId ? { currentSessionId: null, messages: [], isRunning: false } : {}),
-      }))
+    if (type === 'host/session-removed' && typeof payload.sessionId === 'string') {
+      store.getState().removeSessionState(payload.sessionId)
       return
     }
-    if (payload.type === 'host/archived-sessions-changed' && Array.isArray(payload.archivedSessionIds)) {
+    if (type === 'host/archived-sessions-changed' && Array.isArray(payload.archivedSessionIds)) {
       store.setState({ archivedSessionIds: payload.archivedSessionIds.filter((id): id is string => typeof id === 'string') })
       return
     }
+    // 上游把 allowlist 内宿主事件统一经 host/remote-event 转发（events.ts）。
+    // llm/adapters-updated、settings/document-updated、credentials/updated 触发
+    // 模型目录/设置热更新，其余 remote event 保持静默——绝不发起全量 session.list 刷新。
+    if (type === 'host/remote-event' && typeof payload.event === 'string') {
+      const event = payload.event
+      if (
+        event === 'llm/adapters-updated' ||
+        event === 'settings/document-updated' ||
+        event === 'credentials/updated'
+      ) {
+        const sessionId = store.getState().currentSessionId
+        if (sessionId) void store.getState().loadSessionModels(sessionId)
+      }
+      return
+    }
+    // Workspace 推流帧：全快照/删除增量/注册表顺序，本地应用，不整表刷新。
+    if (type === 'host/workspace-changed') {
+      const workspace = (payload as { workspace?: unknown }).workspace
+      if (
+        typeof workspace === 'object' && workspace !== null &&
+        typeof (workspace as { workspaceId?: unknown }).workspaceId === 'string'
+      ) {
+        store.getState().applyHostWorkspaceChanged(workspace as WorkspaceView)
+      }
+      return
+    }
+    if (type === 'host/workspace-removed') {
+      const workspaceId = payload.workspaceId
+      if (typeof workspaceId === 'string') store.getState().applyHostWorkspaceRemoved(workspaceId)
+      return
+    }
+    if (type === 'host/workspace-order-changed') {
+      const workspaceIds = payload.workspaceIds
+      if (Array.isArray(workspaceIds)) {
+        store.getState().applyHostWorkspaceOrder(workspaceIds.filter((id): id is string => typeof id === 'string'))
+      }
+      return
+    }
+    // session-added 等其余 host 帧：回到 list-baseline（session.list + workspace.list）。
     void store.getState().refreshSessions().catch(() => {})
   }
 
@@ -167,25 +232,26 @@ function startGeneration(): void {
     ws.binaryType = 'arraybuffer'
     ws.onopen = () => markReady(kind)
     ws.onmessage = (event) => {
-      if (currentGeneration !== generation || typeof event.data !== 'string') {
-        failGeneration()
+      if (currentGeneration !== generation) return
+      if (typeof event.data !== 'string') {
+        console.error(`[dsh-web-app] dropping non-text WebSocket frame on ${path}`)
         return
       }
       let envelope: unknown
       try {
         envelope = JSON.parse(event.data)
-      } catch {
-        failGeneration()
+      } catch (error) {
+        console.error(`[dsh-web-app] dropping malformed WebSocket frame on ${path}`, error)
         return
       }
-      // The shipped host wraps every payload in a server-request envelope, but
-      // accepting a raw frame keeps the browser compatible with older proxies
-      // and makes reconnects fail only for malformed JSON, not for a valid
-      // frame shape from a compatible carrier.
+      // The current host wraps payloads in server-request envelopes. Raw frames
+      // remain accepted for compatible older carriers.
       if (isServerRequest(envelope)) {
         handle(envelope.payload, envelope)
       } else if (isMuxFrame(envelope) || isHostFrame(envelope)) {
         handle(envelope)
+      } else {
+        console.error(`[dsh-web-app] dropping invalid WebSocket envelope on ${path}`)
       }
     }
     ws.onclose = failGeneration

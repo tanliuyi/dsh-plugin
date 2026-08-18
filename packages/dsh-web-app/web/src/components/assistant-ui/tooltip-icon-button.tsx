@@ -22,7 +22,7 @@ export const TooltipIconButton = forwardRef<
   TooltipIconButtonProps
 >(({ children, tooltip, side = "bottom", className, ...rest }, ref) => {
   return (
-    <TooltipProvider delayDuration={0}>
+    <TooltipProvider delayDuration={500}>
       <Tooltip>
         <TooltipTrigger asChild>
           <Button

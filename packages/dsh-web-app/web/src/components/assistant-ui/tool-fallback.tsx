@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import {
   AlertCircleIcon,
   CheckIcon,
@@ -22,6 +22,13 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { CodeDiff } from "@/components/elements/code-diff";
+import {
+  diffFromEdit,
+  diffFromWrite,
+  parseUnifiedDiff,
+  type ParsedDiff,
+} from "@/lib/unified-diff";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
@@ -259,6 +266,11 @@ function ToolFallbackResult({
 }) {
   if (result === undefined) return null;
 
+  // 文本结果若是一段 unified diff（如 write/edit 的改动输出），用 CodeDiff
+  // 元素渲染；其余照旧落到 pre。
+  const diff =
+    typeof result === "string" ? parseUnifiedDiff(result) : null;
+
   return (
     <div
       data-slot="tool-fallback-result"
@@ -268,9 +280,15 @@ function ToolFallbackResult({
       <p className="aui-tool-fallback-result-header text-muted-foreground text-xs font-medium">
         Result:
       </p>
-      <pre className="aui-tool-fallback-result-content bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
-        {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
-      </pre>
+      {diff ? (
+        <CodeDiff {...diff} className="mt-1 w-full max-w-none" />
+      ) : (
+        <pre className="aui-tool-fallback-result-content bg-muted/50 text-foreground/90 mt-1 rounded-md p-2.5 text-xs whitespace-pre-wrap">
+          {typeof result === "string"
+            ? result
+            : JSON.stringify(result, null, 2)}
+        </pre>
+      )}
     </div>
   );
 }
@@ -526,6 +544,61 @@ function ToolFallbackApproval({
   );
 }
 
+/**
+ * 把 write/edit tool 的 arguments 规整为对象。wire 上 `tool/call` 的
+ * `arguments` 是 JSON **字符串**，而 DshRuntime converter 又对它
+ * `JSON.stringify` 了一次，因此 `argsText` 常是“二次编码”的 JSON；这里逐层
+ * 解包直到结果不是字符串，再要求为普通对象。
+ */
+function normalizeToolArgs(argsText: string | undefined): Record<string, unknown> {
+  if (!argsText) return {}
+  let value: unknown = argsText
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (typeof value !== "string") break
+    try {
+      value = JSON.parse(value) as unknown
+    } catch {
+      break
+    }
+  }
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>
+  }
+  return {}
+}
+
+/**
+ * write/edit 工具的 CodeDiff：result 里只有模型的确认文本，真正的改动在
+ * args（file_path + content / old_string + new_string），与 harness 官方
+ * `presentCall` 的 diff 卡片同构。解析失败（非 write/edit 或缺参数）返 null。
+ */
+function writeEditDiffOf(
+  toolName: string,
+  argsText: string | undefined,
+): ParsedDiff | null {
+  const args = normalizeToolArgs(argsText)
+  const filePath =
+    (typeof args.file_path === "string" ? args.file_path : undefined) ??
+    (typeof args.path === "string" ? args.path : undefined)
+  if (filePath === undefined) return null
+
+  if (toolName === "write") {
+    if (typeof args.content !== "string") return null
+    return diffFromWrite(filePath, args.content)
+  }
+  if (toolName === "edit") {
+    const oldString =
+      (typeof args.old_string === "string" ? args.old_string : undefined) ??
+      (typeof args.oldString === "string" ? args.oldString : undefined)
+    const newString =
+      (typeof args.new_string === "string" ? args.new_string : undefined) ??
+      (typeof args.newString === "string" ? args.newString : undefined)
+    if (oldString === undefined || newString === undefined) return null
+    return diffFromEdit(filePath, oldString, newString)
+  }
+  return null
+}
+
 const ToolFallbackImpl: ToolCallMessagePartComponent = ({
   toolName,
   argsText,
@@ -549,15 +622,27 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
     if (isRequiresAction) setOpen(true);
   }
 
+  const diff = useMemo(
+    () => writeEditDiffOf(toolName, argsText),
+    [toolName, argsText],
+  );
+
   return (
     <ToolFallbackRoot open={open} onOpenChange={setOpen}>
       <ToolFallbackTrigger toolName={toolName} status={status} />
       <ToolFallbackContent>
         <ToolFallbackError status={status} />
-        <ToolFallbackArgs
-          argsText={argsText}
-          className={cn(isCancelled && "opacity-60")}
-        />
+        {diff ? (
+          <CodeDiff {...diff} className="mt-1 w-full max-w-none" />
+        ) : (
+          <>
+            <ToolFallbackArgs
+              argsText={argsText}
+              className={cn(isCancelled && "opacity-60")}
+            />
+            {!isCancelled && <ToolFallbackResult result={result} />}
+          </>
+        )}
         {isRequiresAction && (
           <ToolFallbackApproval
             addResult={addResult}
@@ -567,7 +652,6 @@ const ToolFallbackImpl: ToolCallMessagePartComponent = ({
             respondToApproval={respondToApproval}
           />
         )}
-        {!isCancelled && <ToolFallbackResult result={result} />}
       </ToolFallbackContent>
     </ToolFallbackRoot>
   );

@@ -2,6 +2,7 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import Root from './App'
 import './globals.css'
+import "./styles/markdown.css"
 
 const el = document.getElementById('root')
 if (el === null) throw new Error('web app: missing #root')

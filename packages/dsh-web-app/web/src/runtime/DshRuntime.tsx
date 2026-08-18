@@ -12,18 +12,26 @@ import {
   type ThreadMessageLike,
 } from '@assistant-ui/react'
 import { rpc, type PromptContentPart } from '../dsh/api'
+import { resolveCommandDisposition, commandDraftOf } from '../dsh/commands'
 import { deriveThreadListProjection } from '../dsh/thread-list'
 import { useDsh } from '../dsh/store'
 import type { DshMessage } from '../dsh/messages'
 
 type ThreadContentPart = Exclude<NonNullable<ThreadMessageLike['content']>, string>[number]
 
-/** DshMessage → assistant-ui ThreadMessageLike。 */
+/** DshMessage → assistant-ui ThreadMessageLike。
+ *  steering 角色对 assistant-ui 而言只能是 user/assistant，这里用 assistant 承载，
+ *  但内容就一条 dsh-steering data part——thread 渲染层按 role==='steering'（store
+ *  原数据）拦截成独立 steering 行，绝不落成普通 user 气泡或 assistant 正文。 */
 function convertDshMessage(message: DshMessage): ThreadMessageLike {
+  const role: 'user' | 'assistant' = message.role === 'steering' ? 'assistant' : message.role
   const content = message.parts.flatMap((part): ThreadContentPart[] => {
-    if (part.type === 'tool' && message.role !== 'assistant') return []
+    if (part.type === 'tool' && role !== 'assistant') return []
     if (part.type === 'text') {
       return [{ type: 'text' as const, text: part.text }]
+    }
+    if (part.type === 'steering') {
+      return [{ type: 'data' as const, name: 'dsh-steering', data: { text: part.text } }]
     }
     if (part.type === 'image') {
       return [{ type: 'image' as const, image: part.src ?? '' }]
@@ -33,6 +41,18 @@ function convertDshMessage(message: DshMessage): ThreadMessageLike {
     }
     if (part.type === 'context') {
       return [{ type: 'data' as const, name: 'dsh-context', data: { label: part.label, text: part.text } }]
+    }
+    if (part.type === 'command') {
+      return [{
+        type: 'data' as const,
+        name: 'dsh-command',
+        data: {
+          commandId: part.commandId,
+          commandName: part.name,
+          args: part.args,
+          outcome: part.outcome,
+        },
+      }]
     }
     const isError = part.status === 'error'
     return [{
@@ -47,7 +67,7 @@ function convertDshMessage(message: DshMessage): ThreadMessageLike {
   })
   return {
     id: message.id,
-    role: message.role,
+    role,
     content,
     ...(message.createdAt !== undefined && { createdAt: new Date(message.createdAt) }),
   }
@@ -80,17 +100,29 @@ function toPromptParts(message: AppendMessage): PromptContentPart[] {
   return parts
 }
 
-/** 发送一条用户消息（queue 模式）。host 会经 mux 流回放 user/message 事件驱动 UI。 */
+function clientTimeZone(): string | undefined {
+  try {
+    const value = Intl.DateTimeFormat().resolvedOptions().timeZone
+    return value.trim() === '' ? undefined : value
+  } catch {
+    return undefined
+  }
+}
+
+/** Send one admitted prompt; the durable user/message event remains the UI authority. */
 async function sendPrompt(
   sessionId: string,
   parts: PromptContentPart[],
+  mode: 'queue' | 'steer' = 'queue',
 ): Promise<void> {
-  const result = await rpc('session.prompt', {
+  const timeZone = clientTimeZone()
+  const result = await rpc<{ accepted: true }>('session.prompt', {
     sessionId,
-    mode: 'queue',
+    mode,
     content: parts,
+    ...(timeZone === undefined ? {} : { clientTimeZone: timeZone }),
   })
-  if (!result.ok) throw new Error(result.error.message)
+  if (!result.ok) throw new Error(`conversation.send failed: ${result.error.code}: ${result.error.message}`)
 }
 
 async function sendSubagentPrompt(
@@ -104,13 +136,16 @@ async function sendSubagentPrompt(
   if (!catalog.ok) throw new Error(catalog.error.message)
   const child = catalog.value.entries.find((entry) => entry.kind === 'child' && entry.id === session.sessionId)
   if (!child || child.kind !== 'child' || child.mode !== 'continuable') throw new Error('this subagent is read-only')
+  if (parts.some((part) => part.type === 'image')) throw new Error('Image input is unavailable for subagent continuations.')
+  const timeZone = clientTimeZone()
   const result = await rpc('subagent.prompt', {
     parentSessionId: session.parentSessionId,
     childSessionId: session.sessionId,
     mode: child.mode,
-    content: parts,
+    content: parts.flatMap((part) => part.type === 'text' ? [{ type: 'text' as const, text: part.text ?? '' }] : []),
+    ...(timeZone === undefined ? {} : { clientTimeZone: timeZone }),
   })
-  if (!result.ok) throw new Error(result.error.message)
+  if (!result.ok) throw new Error(`conversation.send failed: ${result.error.code}: ${result.error.message}`)
 }
 
 export function DshRuntimeProvider({ children }: { children: React.ReactNode }) {
@@ -120,12 +155,14 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
   const sessions = useDsh((s) => s.sessions)
   const workspaces = useDsh((s) => s.workspaces)
   const archivedSessionIds = useDsh((s) => s.archivedSessionIds)
+  const pendingInteractions = useDsh((s) => s.pendingInteractions)
   const threadListView = useDsh((s) => s.threadListView)
   const openSession = useDsh((s) => s.openSession)
   const createSession = useDsh((s) => s.createSession)
   const markSessionActive = useDsh((s) => s.markSessionActive)
   const refreshSessions = useDsh((s) => s.refreshSessions)
   const renameSession = useDsh((s) => s.renameSession)
+  const executeCommand = useDsh((s) => s.executeCommand)
 
   const converted = useExternalMessageConverter({
     callback: convertDshMessage,
@@ -137,17 +174,51 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
   const onNew = useCallback(async (message: AppendMessage) => {
     const parts = toPromptParts(message)
     if (parts.length === 0) throw new Error('empty message')
+
     let sessionId = useDsh.getState().currentSessionId
     if (sessionId === null) {
       await createSession()
       sessionId = useDsh.getState().currentSessionId
     }
     if (sessionId === null) throw new Error('failed to create session')
-    const session = useDsh.getState().sessions.find((item) => item.sessionId === sessionId)
+
+    const state = useDsh.getState()
+    const session = state.sessions.find((item) => item.sessionId === sessionId)
+    const commandDraft = commandDraftOf(
+      message.content,
+      (message.attachments?.length ?? 0) > 0,
+    )
+
+    // Subagents have no agent-bound host command catalog. Their slash lines,
+    // including skills, remain ordinary continuation prompts.
+    if (commandDraft !== null && session?.origin !== 'subagent') {
+      const stateNow = useDsh.getState()
+      let commands = stateNow.commands
+      if (stateNow.commandsSessionId !== sessionId || stateNow.commandLoadError !== null) {
+        // loadCommands 失败时不再向外抛：记录 commandLoadError 并保留最后一次缓存。
+        commands = await stateNow.loadCommands(sessionId)
+      }
+      const disposition = resolveCommandDisposition(
+        commandDraft,
+        commands,
+        useDsh.getState().commandLoadError,
+        // skills 只属于发起时的 session：skillsSessionId 不匹配（旧 session 残留）绝不传入。
+        useDsh.getState().skillsSessionId === sessionId ? useDsh.getState().skills : [],
+      )
+      if (disposition.kind === 'execute') {
+        await executeCommand(disposition.line, sessionId)
+        return
+      }
+      if (disposition.kind === 'unavailable') {
+        // 上游语义：目录故障时任何可识别 slash 都报错并保留输入，绝不落 prompt。
+        throw new Error(`command catalog is unavailable — input kept; retry /${disposition.name} later`)
+      }
+    }
+
     if (session?.origin === 'subagent') await sendSubagentPrompt(session, parts)
     else await sendPrompt(sessionId, parts)
     markSessionActive(sessionId)
-  }, [createSession, markSessionActive])
+  }, [createSession, executeCommand, markSessionActive])
 
   const onCancel = useCallback(async () => {
     if (currentSessionId === null) return
@@ -177,7 +248,11 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
       id: s.sessionId,
       title: s.title,
       lastMessageAt: new Date(s.updatedAt),
-      custom: { running: s.running, blank: s.blank },
+      custom: {
+        running: s.running,
+        blank: s.blank,
+        hasPendingRequest: pendingInteractions.some((item) => item.sessionId === s.sessionId),
+      },
     })),
     onSwitchToThread: async (threadId) => {
       await openSession(threadId)
@@ -198,7 +273,7 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
       if (!result.ok) throw new Error(result.error.message)
       await refreshSessions()
     },
-  }), [currentSessionId, projection.sessions, openSession, createSession, refreshSessions, renameSession])
+  }), [currentSessionId, projection.sessions, pendingInteractions, openSession, createSession, refreshSessions, renameSession])
 
   const runtime = useExternalStoreRuntime({
     messages: converted,

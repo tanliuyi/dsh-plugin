@@ -6,9 +6,11 @@ import {
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
 import { File } from "@/components/assistant-ui/file";
+import { ChainOfThought } from "@/components/assistant-ui/chain-of-thought";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/follow-up-suggestions";
 import { Image } from "@/components/assistant-ui/image";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
+import { PlanReviewPanel } from "@/components/assistant-ui/plan-review-panel";
 import {
   Reasoning,
   ReasoningContent,
@@ -17,11 +19,6 @@ import {
   ReasoningTrigger,
 } from "@/components/assistant-ui/reasoning";
 import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
-import {
-  ToolGroupContent,
-  ToolGroupRoot,
-  ToolGroupTrigger,
-} from "@/components/assistant-ui/tool-group";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import {
   Dialog,
@@ -32,19 +29,34 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ApprovalCard } from "@/components/approval-card";
-import { ElicitationForm, type ElicitationField } from "@/components/elicitation-form";
+import {
+  ElicitationForm,
+  type ElicitationField,
+} from "@/components/elicitation-form";
 import { MessageQueue } from "@/components/message-queue";
 import { ComposerTriggerPopover } from "@/components/composer-trigger-popover";
 import { ComposerContext } from "@/components/composer";
 import { ModelSelector } from "@/components/model-selector";
-import {
-  Select,
-  type SelectOption,
-} from "@/components/select";
+import { Select, type SelectOption } from "@/components/select";
 import { useDsh } from "@/dsh/store";
+import { planReviewOf } from "@/dsh/plan-review";
+import type { Question } from "@/dsh/api";
+import type { DshMessage, DshMessagePart } from "@/dsh/messages";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import {
+  $isDirectiveNode,
+  LexicalComposerInput,
+  type DirectiveChipProps,
+} from "@assistant-ui/react-lexical";
+import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext.js";
+import {
+  $createTextNode,
+  $getNodeByKey,
+  $getRoot,
+  $isElementNode,
+} from "lexical";
 import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
@@ -62,27 +74,38 @@ import {
   type FileMessagePartComponent,
   type ImageMessagePartComponent,
   type ToolCallMessagePartComponent,
+  useAui,
   useAuiState,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  ArrowUpRightIcon,
   CheckIcon,
   CopyIcon,
   DownloadIcon,
+  LoaderCircleIcon,
   MicIcon,
   MoreHorizontalIcon,
-  TerminalIcon,
+  PauseIcon,
+  PencilIcon,
+  PlayIcon,
   RefreshCwIcon,
   SquareIcon,
-  ShieldCheckIcon,
-  ShieldIcon,
+  TargetIcon,
+  TerminalIcon,
+  Trash2Icon,
+  XIcon,
 } from "lucide-react";
 import {
   createContext,
   useContext,
+  useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
+  type ClipboardEvent,
   type ComponentType,
   type FC,
   type PropsWithChildren,
@@ -125,7 +148,21 @@ const isNewChatView = (s: AssistantState) =>
   (!s.thread.isLoading || s.threads.isLoading);
 
 export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
+  const booting = useDsh((s) => s.booting);
+  const loadingHistory = useDsh((s) => s.loadingHistory);
   const isEmpty = useAuiState(isNewChatView);
+
+  if (booting || loadingHistory) {
+    return (
+      <div
+        data-slot="aui_thread-loading"
+        className="text-muted-foreground flex min-h-0 flex-1 items-center justify-center gap-2 text-sm"
+      >
+        <LoaderCircleIcon className="size-4 animate-spin" aria-hidden="true" />
+        <span>Loading conversation...</span>
+      </div>
+    );
+  }
 
   return (
     <ThreadComponentsContext.Provider value={components}>
@@ -134,8 +171,83 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
   );
 };
 
+const useInitialInstantBottom = () => {
+  const viewportRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    const previousScrollBehavior = viewport.style.scrollBehavior;
+    const fontSet = document.fonts;
+    let fontsReady = fontSet.status === "loaded";
+    let stopped = false;
+    let frame = 0;
+    let quietTimer = 0;
+    let maxTimer = 0;
+
+    const pinToBottom = () => {
+      viewport.style.scrollBehavior = "auto";
+      viewport.scrollTop = viewport.scrollHeight;
+    };
+    const imagesReady = () =>
+      Array.from(viewport.querySelectorAll<HTMLImageElement>("img")).every(
+        (image) => image.complete,
+      );
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      cancelAnimationFrame(frame);
+      window.clearTimeout(quietTimer);
+      window.clearTimeout(maxTimer);
+      observer.disconnect();
+      viewport.style.scrollBehavior = previousScrollBehavior;
+      viewport.removeEventListener("load", schedulePin, true);
+      viewport.removeEventListener("pointerdown", stop);
+      viewport.removeEventListener("wheel", stop);
+      viewport.removeEventListener("touchstart", stop);
+    };
+    const schedulePin = () => {
+      if (stopped) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        pinToBottom();
+        if (!fontsReady || !imagesReady()) return;
+        window.clearTimeout(quietTimer);
+        quietTimer = window.setTimeout(() => {
+          pinToBottom();
+          stop();
+        }, 1_500);
+      });
+    };
+    const observer = new ResizeObserver(schedulePin);
+
+    const content = viewport.firstElementChild;
+    if (content) observer.observe(content);
+    viewport.addEventListener("load", schedulePin, true);
+    viewport.addEventListener("pointerdown", stop);
+    viewport.addEventListener("wheel", stop, { passive: true });
+    viewport.addEventListener("touchstart", stop, { passive: true });
+    void fontSet.ready.then(() => {
+      fontsReady = true;
+      schedulePin();
+    });
+    maxTimer = window.setTimeout(() => {
+      pinToBottom();
+      stop();
+    }, 5_000);
+
+    pinToBottom();
+    schedulePin();
+    return stop;
+  }, []);
+
+  return viewportRef;
+};
+
 const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
+  const viewportRef = useInitialInstantBottom();
 
   return (
     <ThreadPrimitive.Root
@@ -149,9 +261,12 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
       }}
     >
       <ThreadPrimitive.Viewport
+        ref={viewportRef}
         turnAnchor="top"
+        scrollToBottomOnThreadSwitch={false}
+        scrollToBottomOnInitialize={false}
         data-slot="aui_thread-viewport"
-        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
+        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll"
       >
         <div
           className={cn(
@@ -174,20 +289,22 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
 
           <ThreadPrimitive.ViewportFooter
             className={cn(
-              "aui-thread-viewport-footer bg-background flex flex-col gap-2 overflow-visible pb-4 md:pb-6",
+              "aui-thread-viewport-footer bg-background flex flex-col gap-1 overflow-visible pb-4 md:pb-6",
               !isEmpty &&
                 "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
-            <JobStatusBar />
             <PendingInteractionCards />
-            <QueueDock />
             <GoalBar />
+            <QueueDock />
             <Composer />
             <AuiIf condition={(s) => isNewChatView(s)}>
-              <div data-slot="aui_thread-suggestions-spacer" className="min-h-8">
+              <div
+                data-slot="aui_thread-suggestions-spacer"
+                className="min-h-8"
+              >
                 <AuiIf condition={(s) => s.composer.isEmpty}>
                   <ThreadSuggestions />
                 </AuiIf>
@@ -203,120 +320,360 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
 const ThreadMessage: FC = () => {
   const { AssistantMessage: AssistantMessageComponent = AssistantMessage } =
     useContext(ThreadComponentsContext);
+  const messageId = useAuiState((s) => s.message.id);
   const role = useAuiState((s) => s.message.role);
   const isEditing = useAuiState((s) => s.message.composer.isEditing);
+  // Steering 是注入活跃 turn 的用户输入：不渲染为普通 user 气泡，也不伪装成
+  // assistant 正文。converter 已把 role 映射成 assistant + dsh-steering data part；
+  // 这里按 store 原数据（role==='steering'）拦截，渲染紧凑独立 steering 行。
+  const steering = useDsh((s) =>
+    messageId
+      ? s.messages.find((m) => m.id === messageId && m.role === "steering")
+      : undefined,
+  );
 
   if (isEditing) return <EditComposer />;
+  if (steering) return <SteeringRow message={steering} />;
   if (role === "user") return <UserMessage />;
   return <AssistantMessageComponent />;
 };
 
-const GoalBar: FC = () => {
-  const goal = useDsh((s) => s.goal);
-  const pause = useDsh((s) => s.pauseGoal);
-  const resume = useDsh((s) => s.resumeGoal);
-  const complete = useDsh((s) => s.completeGoal);
-  const clear = useDsh((s) => s.clearGoal);
-  const edit = useDsh((s) => s.editGoal);
-  const [editing, setEditing] = useState(false);
-  const [objective, setObjective] = useState("");
-  if (!goal) return null;
-  const isPaused = goal.goal.phase === "paused";
-  const isComplete = goal.goal.phase === "complete";
+/**
+ * SteeringRow: 活跃 turn 中注入的用户输入（上游 SteeringMessageNode）。
+ * 文字完整可见、可换行；附带图片按原样渲染（至少不丢文字）。
+ */
+const SteeringRow: FC<{ message: DshMessage }> = ({ message }) => {
+  const text = message.parts
+    .filter(
+      (part): part is Extract<DshMessagePart, { type: "steering" }> =>
+        part.type === "steering",
+    )
+    .map((part) => part.text)
+    .join("\n");
+  const images = message.parts.filter(
+    (part): part is DshMessagePart & { type: "image"; src?: string } =>
+      part.type === "image",
+  );
   return (
-    <div data-slot="aui_goal_bar" className="bg-muted/30 flex items-center gap-2 rounded-xl px-3 py-2 text-xs">
-      <span aria-hidden className="text-foreground/70">Goal</span>
-      {editing ? (
-        <>
-          <Input
-            value={objective}
-            onChange={(event) => setObjective(event.target.value)}
-            placeholder={goal.goal.objective}
-            className="h-7 min-w-0 flex-1 text-xs"
-            aria-label="Goal objective"
-          />
-          <Button size="sm" variant="ghost" onClick={() => { void edit(objective || undefined); setEditing(false); }}>Save</Button>
-          <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
-        </>
-      ) : (
-        <span className="min-w-0 flex-1 truncate" title={goal.goal.objective}>{goal.goal.objective}</span>
+    <div
+      data-slot="aui_steering-row"
+      data-role="steering"
+      className="fade-in slide-in-from-bottom-1 animate-in border-border/50 bg-muted/20 my-1 flex flex-col gap-1.5 rounded-md border-l-2 border-dashed px-3 py-2 duration-150"
+    >
+      <div className="flex items-center gap-1.5">
+        <ArrowUpRightIcon
+          aria-hidden
+          className="text-muted-foreground size-3.5 shrink-0"
+        />
+        <span className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
+          Steering
+        </span>
+      </div>
+      {text !== "" && (
+        <p className="text-foreground text-sm leading-relaxed break-words whitespace-pre-wrap">
+          {text}
+        </p>
       )}
-      {!editing ? <span className="text-muted-foreground shrink-0">{goal.goal.phase} · {goal.roundsStarted}/{goal.goal.maxGoalRounds}</span> : null}
-      {!editing && !isComplete ? <Button size="sm" variant="ghost" onClick={() => { setObjective(goal.goal.objective); setEditing(true); }}>Edit</Button> : null}
-      {!editing && !isComplete ? <Button size="sm" variant="ghost" onClick={() => void (isPaused ? resume() : pause())}>{isPaused ? "Resume" : "Pause"}</Button> : null}
-      {!editing && !isComplete ? <Button size="sm" variant="ghost" onClick={() => void complete()}>Complete</Button> : null}
-      {!editing ? <Button size="sm" variant="ghost" onClick={() => void clear()}>Clear</Button> : null}
+      {images.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {images.map((image) => (
+            <img
+              key={image.attachmentId}
+              src={image.src ?? ""}
+              alt={image.name ?? "steering attachment"}
+              className="border-border/60 max-h-36 rounded-lg border object-contain"
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 };
 
-const JobStatusBar: FC = () => {
-  const currentSessionId = useDsh((s) => s.currentSessionId);
-  const jobsBySession = useDsh((s) => s.jobsBySession);
-  const sessions = useDsh((s) => s.sessions);
-  const jobs = currentSessionId ? jobsBySession[currentSessionId] ?? [] : [];
-  const subagentCount = useMemo(
-    () => currentSessionId
-      ? sessions.filter((session) => session.parentSessionId === currentSessionId || (session.origin === "subagent" && session.parentSessionId === currentSessionId)).length
-      : 0,
-    [currentSessionId, sessions],
-  );
-  if (jobs.length === 0 && subagentCount === 0) return null;
+/**
+ * GoalBar: the goal indicator docked above the composer, mirroring the
+ * upstream ui-goal strip. A present goal shows a goal glyph, a phase label,
+ * the truncated objective, and icon actions — resume when paused, edit
+ * (inline form in the same strip), and clear. Creation lives on the `/goal`
+ * command, not here: no goal (null), loading (undefined), and complete goals
+ * render nothing. Live state arrives as the projected whole snapshot; the
+ * verbs go through the store goal RPCs with the CAS ref read at call time.
+ */
+const GOAL_PHASE_LABELS = {
+  active: "Ongoing Goal",
+  paused: "Paused Goal",
+  blocked: "Blocked Goal",
+} as const;
+
+const GoalBar: FC = () => {
+  const projection = useDsh((s) => s.goal);
+  const pause = useDsh((s) => s.pauseGoal);
+  const resume = useDsh((s) => s.resumeGoal);
+  const clear = useDsh((s) => s.clearGoal);
+  const edit = useDsh((s) => s.editGoal);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [clearedGoalId, setClearedGoalId] = useState<string | null>(null);
+  const pendingRef = useRef(false);
+
+  const goal = projection?.goal;
+  const goalId = goal?.id;
+
+  // A new goal identity (cleared/completed/replaced externally) invalidates
+  // the local edit state: without the reset a surviving draft's Enter would
+  // write over the NEW goal.
+  useEffect(() => {
+    setEditing(false);
+    setActionError(null);
+    setClearedGoalId(null);
+  }, [goalId]);
+
+  // React state disables the controls on the next render; the ref closes the
+  // same-render window so rapid clicks cannot submit the same CAS twice.
+  const runAction = async (action: () => Promise<void>): Promise<boolean> => {
+    if (pendingRef.current) return false;
+    pendingRef.current = true;
+    setPending(true);
+    setActionError(null);
+    try {
+      await action();
+      return true;
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+    }
+  };
+
+  const handleEdit = async () => {
+    const trimmed = draft.trim();
+    if (trimmed === "") return;
+    const ok = await runAction(async () => {
+      await edit(trimmed);
+    });
+    if (ok) setEditing(false);
+  };
+
+  const handleClear = async () => {
+    if (!goal) return;
+    const ok = await runAction(clear);
+    // Suppress this exact goal id while the authoritative null projection
+    // catches up after the clear.
+    if (ok) setClearedGoalId(goal.id);
+  };
+
+  // Loading, absent, completed, and freshly-cleared goals have no strip.
+  if (!goal || goal.phase === "complete" || goal.id === clearedGoalId)
+    return null;
+
+  if (editing) {
+    return (
+      <div
+        data-slot="aui_goal_bar"
+        className="bg-muted/30 flex items-center gap-2 rounded-xl px-3 py-2 text-xs"
+      >
+        <TargetIcon
+          aria-hidden
+          className="text-muted-foreground size-4 shrink-0"
+        />
+        <Input
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") void handleEdit();
+            if (event.key === "Escape") setEditing(false);
+          }}
+          autoFocus
+          className="h-7 min-w-0 flex-1 text-xs"
+          aria-label="Goal objective"
+        />
+        {actionError !== null ? (
+          <span
+            role="alert"
+            className="text-destructive max-w-64 shrink-0 truncate"
+            title={actionError}
+          >
+            {actionError}
+          </span>
+        ) : null}
+        <div className="flex shrink-0 items-center gap-0.5">
+          <TooltipIconButton
+            tooltip="Save goal"
+            aria-label="Save goal"
+            disabled={pending || draft.trim() === ""}
+            onClick={() => void handleEdit()}
+          >
+            <CheckIcon className="size-3.5" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            tooltip="Cancel edit"
+            aria-label="Cancel edit"
+            disabled={pending}
+            onClick={() => setEditing(false)}
+          >
+            <XIcon className="size-3.5" />
+          </TooltipIconButton>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
-      data-slot="aui_thread-job-status"
-      className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs"
-      role="status"
+      data-slot="aui_goal_bar"
+      className="bg-muted/30 flex items-center gap-2 rounded-lg px-3 py-1 text-xs"
+      title={goal.phase === "blocked" ? goal.blockedReason?.message : undefined}
     >
-      {jobs.map((job) => (
+      <TargetIcon
+        aria-hidden
+        className="text-muted-foreground size-4 shrink-0"
+      />
+      <span className="text-muted-foreground shrink-0">
+        {GOAL_PHASE_LABELS[goal.phase]}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{goal.objective}</span>
+      {actionError !== null ? (
         <span
-          key={job.id}
-          data-slot="aui_thread-job"
-          data-status={job.status}
-          className="bg-muted/60 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1"
+          role="alert"
+          className="text-destructive max-w-64 shrink-0 truncate"
+          title={actionError}
         >
-          <span aria-hidden className={cn("size-1.5 rounded-full", job.status === "running" ? "bg-emerald-500" : "bg-muted-foreground/50")} />
-          <span className="max-w-56 truncate">{job.label}</span>
-          {job.detail ? <span className="text-muted-foreground/70">{job.detail}</span> : null}
-        </span>
-      ))}
-      {subagentCount > 0 ? (
-        <span data-slot="aui_thread-subagent-count" className="bg-muted/60 rounded-full px-2.5 py-1">
-          {subagentCount} subagent{subagentCount === 1 ? "" : "s"}
+          {actionError}
         </span>
       ) : null}
+      <div className="flex shrink-0 items-center gap-0.5">
+        {goal.phase === "active" ? (
+          <TooltipIconButton
+            tooltip="Pause goal"
+            aria-label="Pause goal"
+            disabled={pending}
+            onClick={() => void runAction(pause)}
+          >
+            <PauseIcon className="size-3.5" />
+          </TooltipIconButton>
+        ) : null}
+        {goal.phase === "paused" ? (
+          <TooltipIconButton
+            tooltip="Resume goal"
+            aria-label="Resume goal"
+            disabled={pending}
+            onClick={() => void runAction(resume)}
+          >
+            <PlayIcon className="size-3.5" />
+          </TooltipIconButton>
+        ) : null}
+        <TooltipIconButton
+          tooltip="Edit goal"
+          aria-label="Edit goal"
+          disabled={pending}
+          onClick={() => {
+            setDraft(goal.objective);
+            setEditing(true);
+          }}
+        >
+          <PencilIcon className="size-3.5" />
+        </TooltipIconButton>
+        <TooltipIconButton
+          tooltip="Clear goal"
+          aria-label="Clear goal"
+          disabled={pending}
+          onClick={() => void handleClear()}
+        >
+          <Trash2Icon className="size-3.5" />
+        </TooltipIconButton>
+      </div>
     </div>
   );
 };
+
+function commandForCall(
+  messages: DshMessage[],
+  callId?: string,
+): string | undefined {
+  if (!callId) return undefined;
+  for (const message of messages) {
+    const part = message.parts.find(
+      (item) => item.type === "tool" && item.callId === callId,
+    );
+    if (!part || part.type !== "tool") continue;
+    if (
+      typeof part.args === "object" &&
+      part.args !== null &&
+      typeof (part.args as { command?: unknown }).command === "string"
+    ) {
+      return (part.args as { command: string }).command;
+    }
+    if (typeof part.args === "string") {
+      try {
+        const parsed = JSON.parse(part.args) as { command?: unknown };
+        if (typeof parsed.command === "string") return parsed.command;
+      } catch {
+        return part.args;
+      }
+    }
+  }
+  return undefined;
+}
 
 const PendingInteractionCards: FC = () => {
   const currentSessionId = useDsh((s) => s.currentSessionId);
   const pendingInteractions = useDsh((s) => s.pendingInteractions);
   const pending = useMemo(
-    () => pendingInteractions.filter((item) => item.sessionId === currentSessionId),
+    () =>
+      pendingInteractions.filter((item) => item.sessionId === currentSessionId),
     [currentSessionId, pendingInteractions],
   );
   const respond = useDsh((s) => s.respondToInteraction);
+  const messages = useDsh((s) => s.messages);
 
   // 无待处理交互时不渲染，避免空容器占位。
   if (pending.length === 0) return null;
 
   return (
-    <div className="flex flex-col items-end gap-3">
+    <div className="flex w-full flex-col items-stretch gap-3">
       {pending.map((item) => {
         if (item.kind === "question") {
-          return <QuestionInteraction key={item.rpcId} interaction={{ rpcId: item.rpcId, sessionId: item.sessionId, payload: item.payload as { questions: unknown[] } }} onRespond={respond} />;
+          return (
+            <QuestionInteraction
+              key={item.rpcId}
+              interaction={{
+                rpcId: item.rpcId,
+                sessionId: item.sessionId,
+                payload: item.payload as { questions: Question[] },
+              }}
+              onRespond={respond}
+            />
+          );
         }
-        const approval = item.payload as { approvalId: string; toolName: string; reason?: string };
+        const approval = item.payload as {
+          approvalId: string;
+          toolName: string;
+          callId?: string;
+          command?: string;
+          reason?: string;
+        };
         const answer = (outcome: "allowed-once" | "rejected") =>
-          void respond(item.rpcId, { ok: true, value: { sessionId: item.sessionId, approvalId: approval.approvalId, outcome } });
+          respond(item.rpcId, {
+            ok: true,
+            value: {
+              sessionId: item.sessionId,
+              approvalId: approval.approvalId,
+              outcome,
+            },
+          });
         return (
           <ApprovalCard
             key={item.rpcId}
             state="request"
-            command={approval.toolName}
-            title="Permission required"
-            subtitle={approval.reason ?? "This action needs your approval"}
+            command={
+              approval.command ?? commandForCall(messages, approval.callId)
+            }
+            title="等待审批"
+            subtitle={approval.reason ?? `需要批准 ${approval.toolName}`}
             onAllowOnce={() => answer("allowed-once")}
             onDeny={() => answer("rejected")}
           />
@@ -326,32 +683,75 @@ const PendingInteractionCards: FC = () => {
   );
 };
 
+function parseRecommendedLabel(label: string): {
+  label: string;
+  recommended: boolean;
+} {
+  const suffix =
+    /\s*(?:\((?:recommended|推荐)\)|（(?:recommended|推荐)）)\s*$/i;
+  return suffix.test(label)
+    ? { label: label.replace(suffix, ""), recommended: true }
+    : { label, recommended: false };
+}
+
 const QuestionInteraction: FC<{
-  interaction: { rpcId: string; sessionId: string; payload: { questions: unknown[] } };
-  onRespond: (rpcId: string, result: { ok: boolean; value?: unknown; error?: unknown }) => Promise<void>;
+  interaction: {
+    rpcId: string;
+    sessionId: string;
+    payload: { questions: Question[] };
+  };
+  onRespond: (
+    rpcId: string,
+    result: { ok: boolean; value?: unknown; error?: unknown },
+  ) => Promise<void>;
 }> = ({ interaction, onRespond }) => {
-  type Question = { id: string; header?: string; question: string; detail?: string; options?: Array<{ label: string; description?: string }>; multiSelect?: boolean };
   type Draft = { selected: string[]; custom: string };
-  const questions = interaction.payload.questions as Question[];
+  const questions = interaction.payload.questions;
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  // plan-review 呈现意图（对齐上游 ui-user-questions contract/slots.ts）：
+  // 命中即渲染专用接管面板（单一问题 + plan 正文做一张决策卡）；未命中才走
+  // 通用提问表单，generic 流程保持原样。认领守卫由 planReviewOf 承担。
+  const planReview = useMemo(() => planReviewOf(questions), [questions]);
   const fields: ElicitationField[] = questions.map((question) => {
     const draft = drafts[question.id] ?? { selected: [], custom: "" };
     return {
       name: question.id,
       label: question.header ?? question.question,
-      value: draft.custom || draft.selected.join(", "),
+      value: draft.selected.join(", "),
+      customValue: draft.custom,
       selected: draft.selected,
       kind: question.options?.length ? "choice" : "text",
-      options: question.options?.map((option) => option.label),
+      multiSelect: question.multiSelect === true,
+      allowCustom: true,
+      customPlaceholder: "输入你的答案",
+      options: question.options?.map((option) => {
+        const parsed = parseRecommendedLabel(option.label);
+        return {
+          value: option.label,
+          label: parsed.label,
+          description: option.description,
+          recommended: parsed.recommended,
+        };
+      }),
       required: true,
     };
   });
+  const updateCustom = (name: string, value: string) => {
+    setDrafts((current) => ({
+      ...current,
+      [name]: {
+        ...(current[name] ?? { selected: [], custom: "" }),
+        custom: value,
+      },
+    }));
+  };
   const update = (name: string, value: string) => {
     const question = questions.find((item) => item.id === name);
     if (!question) return;
     setDrafts((current) => {
       const previous = current[name] ?? { selected: [], custom: "" };
-      if (!question.options?.length) return { ...current, [name]: { selected: [], custom: value } };
+      if (!question.options?.length)
+        return { ...current, [name]: { selected: [], custom: value } };
       const selected = question.multiSelect
         ? previous.selected.includes(value)
           ? previous.selected.filter((item) => item !== value)
@@ -370,7 +770,8 @@ const QuestionInteraction: FC<{
             const draft = drafts[question.id] ?? { selected: [], custom: "" };
             return {
               id: question.id,
-              selected: draft.custom && !question.multiSelect ? [] : draft.selected,
+              selected:
+                draft.custom && !question.multiSelect ? [] : draft.selected,
               ...(draft.custom ? { custom: draft.custom } : {}),
             };
           }),
@@ -378,6 +779,17 @@ const QuestionInteraction: FC<{
       },
     });
   };
+  // 命中 plan-review：接管面板能送出该请求允许的每一个答案，直接渲染决策卡。
+  if (planReview) {
+    return (
+      <PlanReviewPanel
+        rpcId={interaction.rpcId}
+        sessionId={interaction.sessionId}
+        review={planReview}
+        onRespond={onRespond}
+      />
+    );
+  }
   return (
     <ElicitationForm
       server="Agent"
@@ -385,11 +797,18 @@ const QuestionInteraction: FC<{
       fields={fields}
       state="request"
       onFieldChange={update}
+      onCustomChange={updateCustom}
       onAccept={answer}
-      onDecline={() => void onRespond(interaction.rpcId, {
-        ok: false,
-        error: { code: "cancelled", message: "the user closed this question request", details: {} },
-      })}
+      onDecline={() =>
+        void onRespond(interaction.rpcId, {
+          ok: false,
+          error: {
+            code: "cancelled",
+            message: "the user closed this question request",
+            details: {},
+          },
+        })
+      }
     />
   );
 };
@@ -442,21 +861,30 @@ const NewSessionControls: FC = () => {
     label: workspace.title,
     textValue: `${workspace.title} ${workspace.path}`,
   }));
-  const fallbackWorkspace = hostCwd?.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+  const fallbackWorkspace = hostCwd
+    ?.replace(/[\\/]+$/, "")
+    .split(/[\\/]/)
+    .pop();
   if (!workspaceOptions.length && fallbackWorkspace) {
     workspaceOptions.push({ value: "__host__", label: fallbackWorkspace });
   }
-  const presetOptions: SelectOption[] = presets.filter((preset) => !preset.broken).map((preset) => ({
-    value: preset.id,
-    label: (
-      <span className="flex max-w-64 flex-col items-start text-left">
-        <span>{preset.name ?? preset.id}</span>
-        {preset.description && <span className="text-muted-foreground line-clamp-2 text-xs">{preset.description}</span>}
-      </span>
-    ),
-    triggerLabel: preset.name ?? preset.id,
-    textValue: `${preset.name ?? preset.id} ${preset.description ?? ""}`,
-  }));
+  const presetOptions: SelectOption[] = presets
+    .filter((preset) => !preset.broken)
+    .map((preset) => ({
+      value: preset.id,
+      label: (
+        <span className="flex max-w-64 flex-col items-start text-left">
+          <span>{preset.name ?? preset.id}</span>
+          {preset.description && (
+            <span className="text-muted-foreground line-clamp-2 text-xs">
+              {preset.description}
+            </span>
+          )}
+        </span>
+      ),
+      triggerLabel: preset.name ?? preset.id,
+      textValue: `${preset.name ?? preset.id} ${preset.description ?? ""}`,
+    }));
 
   return (
     <div className="aui-new-session-drawer -mb-4 h-11 w-full overflow-hidden rounded-t-2xl border border-border/60 border-b-0 bg-muted/45 px-3 py-1 shadow-[0_-2px_10px_-8px_rgba(0,0,0,0.25)]">
@@ -464,7 +892,9 @@ const NewSessionControls: FC = () => {
         {workspaceOptions.length > 0 && (
           <Select
             value={workspaceId ?? workspaceOptions[0]!.value}
-            onValueChange={(value) => setWorkspace(value === "__host__" ? "" : value)}
+            onValueChange={(value) =>
+              setWorkspace(value === "__host__" ? "" : value)
+            }
             options={workspaceOptions}
             className="h-7 max-w-48 items-center px-2 py-1 text-xs"
             placeholder="Workspace"
@@ -473,7 +903,9 @@ const NewSessionControls: FC = () => {
         {presetOptions.length > 0 && (
           <Select
             value={agentPreset ?? presetOptions[0]!.value}
-            onValueChange={(value) => void setAgentPreset(value).catch(() => {})}
+            onValueChange={(value) =>
+              void setAgentPreset(value).catch(() => {})
+            }
             options={presetOptions}
             className="h-7 max-w-64 items-center px-2 py-1 text-xs"
             placeholder="Mode"
@@ -522,105 +954,322 @@ const ThreadSuggestionItem: FC = () => {
 };
 
 const Composer: FC = () => {
+  const currentSessionId = useDsh((s) => s.currentSessionId);
+  const hasPendingInteraction = useDsh((s) =>
+    s.pendingInteractions.some((item) => item.sessionId === currentSessionId),
+  );
+  const aui = useAui();
   const slash = useSlashCommands();
+  const handlePaste = async (event: ClipboardEvent<HTMLDivElement>) => {
+    const files = Array.from(event.clipboardData.files);
+    if (!aui.thread.getState().capabilities.attachments || files.length === 0)
+      return;
+    event.preventDefault();
+    await Promise.all(
+      files.map(async (file) => {
+        try {
+          await aui.composer.addAttachment(file);
+        } catch {
+          // Attachment adapters report upload errors through composer state.
+        }
+      }),
+    );
+  };
 
   return (
     <ComposerPrimitive.Unstable_TriggerPopoverRoot>
-      <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
-      <ComposerPrimitive.AttachmentDropzone asChild>
-        <div
-          data-slot="aui_composer-shell"
-          className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
-        >
-          <ComposerAttachments />
-          <ComposerPrimitive.Input
-            placeholder="Send a message..."
-            className="aui-composer-input caret-primary placeholder:text-muted-foreground/80 max-h-32 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base outline-none"
-            rows={1}
-            autoFocus
-            enterKeyHint="send"
-            aria-label="Message input"
-          />
-          <ComposerAction />
-        </div>
-      </ComposerPrimitive.AttachmentDropzone>
-      <ComposerTriggerPopover
-        char="/"
-        adapter={slash.adapter}
-        directive={slash.directive}
-        fallbackIcon={TerminalIcon}
-        emptyItemsLabel="没有匹配的命令"
-      />
-    </ComposerPrimitive.Root>
-  </ComposerPrimitive.Unstable_TriggerPopoverRoot>
+      <ComposerPrimitive.Root
+        className={cn(
+          "aui-composer-root relative flex w-full flex-col",
+          hasPendingInteraction && "hidden",
+        )}
+      >
+        <ComposerPrimitive.AttachmentDropzone asChild>
+          <div
+            data-slot="aui_composer-shell"
+            className="border-border/60 data-[dragging=true]:border-ring focus-within:border-border dark:border-muted-foreground/15 dark:focus-within:border-muted-foreground/30 flex w-full flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:shadow-[0_6px_24px_-8px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.05)] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))] dark:shadow-none"
+          >
+            <ComposerAttachments />
+            <LexicalComposerInput
+              placeholder="Send a message..."
+              className="aui-composer-input text-foreground caret-primary placeholder:text-sm placeholder:text-muted-foreground/80 max-h-32 min-h-10 w-full bg-transparent text-sm outline-none"
+              autoFocus
+              submitMode="enter"
+              aria-label="Message input"
+              directiveChip={SlashDirectiveChip}
+              onPaste={handlePaste}
+              children={<SlashCommandPlaceholderPlugin />}
+            />
+            <ComposerAction />
+          </div>
+        </ComposerPrimitive.AttachmentDropzone>
+        <ComposerTriggerPopover
+          char="/"
+          adapter={slash.adapter}
+          directive={slash.directive}
+          fallbackIcon={TerminalIcon}
+          emptyItemsLabel="没有匹配的命令"
+        />
+      </ComposerPrimitive.Root>
+    </ComposerPrimitive.Unstable_TriggerPopoverRoot>
   );
 };
 
 const useSlashCommands = () => {
+  const aui = useAui();
+  const currentSessionId = useDsh((s) => s.currentSessionId);
   const executeCommand = useDsh((s) => s.executeCommand);
   const dynamicCommands = useDsh((s) => s.commands);
+  // 菜单只显示匹配当前 session 的 skills：store open 已清空跨会话残留，且
+  // skillsSessionId 必须等于 currentSessionId（旧 session 晚到的目录不得显示）。
+  const skillsSessionId = useDsh((s) => s.skillsSessionId);
+  const skills = useDsh((s) => s.skills);
   const commands = useMemo(() => {
-    const source = dynamicCommands.length > 0
-      ? dynamicCommands
-      : [
-          { name: "compact", description: "压缩当前会话上下文" },
-          { name: "goal", description: "输入目标，智能体将持续执行" },
-          { name: "permission", description: "选择权限模式" },
-          { name: "plan", description: "输入计划内容" },
-        ];
-    return source.map((command) => ({
+    const commandItems = dynamicCommands.map((command) => ({
       id: command.name,
       label: `/${command.name}`,
       description: command.description ?? "",
       execute: () => {
-        if (command.name === "compact") void executeCommand(`/compact`);
+        // no-op：满足 adapter 类型。bare command 的 insert 语义由 directive.onInserted
+        // 唯一负责（execute 只在菜单选中时触发一次，这里无需重复执行）。
       },
     }));
-  }, [dynamicCommands, executeCommand]);
+    // skill 目录（上游 ui-skill / skill.list）：用户可调用的 /name 条目。
+    // 调用本身是一次普通 session.prompt，宿主导出预置注入 <skill_content>；
+    // 这里仅让它们出现在斜杠菜单里（指令插入模式会填入 `/name`）。
+    // 与 host command 同名的 skill 被过滤：command 优先，避免菜单出现两行同名项。
+    const commandNames = new Set(dynamicCommands.map((command) => command.name));
+    const skillItems = (skillsSessionId === currentSessionId ? skills : [])
+      .filter((skill) => !commandNames.has(skill.name))
+      .map((skill) => ({
+        id: `skill:${skill.name}`,
+        label: `/${skill.name}`,
+        description: skill.description ?? "",
+        execute: () => {
+          // no-op：directive 插入 `/name`，回车后走普通 prompt，宿主识别 skill 注入。
+        },
+      }));
+    return [...commandItems, ...skillItems];
+  }, [currentSessionId, dynamicCommands, skills, skillsSessionId]);
   const slash = unstable_useSlashCommandAdapter({ commands });
+  // 防抖：同一 bare command 的 onInserted 只执行一次（直到该次 execute 落定）。
+  const executingBareCommand = useRef<string | null>(null);
   return {
     adapter: slash.adapter,
-    directive: { formatter: slashDirectiveFormatter },
+    directive: {
+      formatter: slashDirectiveFormatter,
+      onInserted: (item: { id: string }) => {
+        const command = dynamicCommands.find((entry) => entry.name === item.id);
+        // input command：保留 directive，让用户继续输入参数（不 execute）。
+        if (command?.input !== undefined) return;
+        // skill/未知项：保留 directive，回车走普通 prompt。
+        if (command === undefined) return;
+        if (executingBareCommand.current === item.id) return;
+        executingBareCommand.current = item.id;
+        // Bare command picks are detached actions: consume the inserted token
+        // immediately, then execute exactly once and clear the composer.
+        aui.composer.setText("");
+        void executeCommand(`/${command.name}`)
+          .catch((cause) => {
+            useDsh.setState({
+              error: cause instanceof Error ? cause.message : String(cause),
+            });
+          })
+          .finally(() => {
+            if (executingBareCommand.current === item.id)
+              executingBareCommand.current = null;
+          });
+      },
+    },
   };
+};
+
+const slashCommandHints: Record<string, string> = {
+  goal: "输入目标，智能体将持续执行",
+  permission: "选择权限模式",
+  plan: "描述你的任务以生成计划",
+};
+
+const SlashDirectiveChip: FC<DirectiveChipProps> = ({ directiveId, label }) => (
+  <span className="aui-directive-chip" data-directive-id={directiveId}>
+    <span className="aui-directive-chip-label">{label}</span>
+  </span>
+);
+
+type PlaceholderPosition = {
+  text: string;
+  left: number;
+  top: number;
+};
+
+const SlashCommandPlaceholderPlugin: FC = () => {
+  const [editor] = useLexicalComposerContext();
+  const initializedDirectiveKey = useRef<string | null>(null);
+  const [placeholder, setPlaceholder] = useState<PlaceholderPosition | null>(
+    null,
+  );
+
+  useLayoutEffect(() => {
+    let frame = 0;
+    const update = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        let directiveKey: string | null = null;
+        let needsSpace = false;
+        editor.getEditorState().read(() => {
+          const root = $getRoot();
+          const directiveNode = root
+            .getChildren()
+            .flatMap((child) =>
+              $isElementNode(child) ? child.getChildren() : [],
+            )
+            .find($isDirectiveNode);
+          const item = directiveNode?.getDirectiveItem();
+          if (!directiveNode || !item) {
+            initializedDirectiveKey.current = null;
+          } else if (root.getTextContent() === item.label) {
+            directiveKey = directiveNode.getKey();
+            const next = directiveNode.getNextSibling();
+            needsSpace =
+              initializedDirectiveKey.current !== directiveKey &&
+              !next?.getTextContent().startsWith(" ");
+          }
+        });
+
+        if (needsSpace && directiveKey) {
+          initializedDirectiveKey.current = directiveKey;
+          editor.update(() => {
+            const node = $getNodeByKey(directiveKey!);
+            if (!$isDirectiveNode(node)) return;
+            const next = node.getNextSibling();
+            if (next?.getTextContent().startsWith(" ")) return;
+            const space = $createTextNode(" ");
+            node.insertAfter(space);
+            space.select(1, 1);
+          });
+          return;
+        }
+
+        editor.getEditorState().read(() => {
+          const root = $getRoot();
+          const text = root.getTextContent();
+          const directiveNode = root
+            .getChildren()
+            .flatMap((child) =>
+              $isElementNode(child) ? child.getChildren() : [],
+            )
+            .find($isDirectiveNode);
+          const item = directiveNode?.getDirectiveItem();
+          const rootElement = editor.getRootElement();
+          const chip = rootElement?.querySelector<HTMLElement>(
+            ".aui-directive-chip",
+          );
+          const wrapper = rootElement?.parentElement;
+
+          if (
+            !item ||
+            !chip ||
+            !wrapper ||
+            (text !== item.label && text !== `${item.label} `)
+          ) {
+            setPlaceholder(null);
+            return;
+          }
+
+          const chipRect = chip.getBoundingClientRect();
+          const wrapperRect = wrapper.getBoundingClientRect();
+          setPlaceholder({
+            text: slashCommandHints[item.id] ?? "",
+            left: chipRect.right - wrapperRect.left + 5,
+            top: chipRect.top - wrapperRect.top,
+          });
+        });
+      });
+    };
+
+    update();
+    const unregister = editor.registerUpdateListener(update);
+    window.addEventListener("resize", update);
+    return () => {
+      unregister();
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", update);
+    };
+  }, [editor]);
+
+  if (!placeholder?.text) return null;
+  return (
+    <span
+      aria-hidden="true"
+      className="aui-lexical-command-placeholder"
+      style={{ left: placeholder.left, top: placeholder.top }}
+    >
+      {placeholder.text}
+    </span>
+  );
 };
 
 const slashDirectiveFormatter: Unstable_DirectiveFormatter = {
   serialize(item) {
-    const hints: Record<string, string> = {
-      goal: "输入目标，智能体将持续执行",
-      permission: "选择权限模式",
-      plan: "输入计划内容",
-    };
-    const hint = hints[item.id];
-    return hint ? `${item.label} ${hint}` : item.label;
+    return item.label;
   },
   parse: unstable_defaultDirectiveFormatter.parse,
 };
 
-const permissionShieldOutline = "M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z";
+const permissionShieldOutline =
+  "M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z";
 
 const PermissionGlyph: FC<{ value: string }> = ({ value }) => {
   if (value === "workspace-write") {
     return (
       <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-        <path d="M8.08887 0.251709C8.20479 0.23085 8.32486 0.241168 8.43652 0.282959L15.0215 2.75171C15.2787 2.84819 15.4492 3.09414 15.4492 3.3689V7.0105C15.4492 7.10986 15.4441 7.2081 15.4414 7.30542C15.0285 7.07175 14.5905 6.87675 14.1309 6.73022V3.82495L8.20508 1.60327L2.2793 3.82495V7.0105C2.27936 9.7171 3.4745 11.5379 5.02734 12.7947C5.01025 12.9942 5 13.1962 5 13.4001C5.00001 13.7617 5.02722 14.1169 5.08008 14.4636C2.91555 13.0393 0.961014 10.752 0.960938 7.0105V3.3689C0.960938 3.09417 1.13146 2.84821 1.38867 2.75171L7.97461 0.282959C8.01261 0.268728 8.05076 0.258321 8.08887 0.251709Z" fill="currentColor" />
-        <path d="M11.3525 5.64688V6.85688H5V5.64688H11.3525Z" fill="currentColor" />
-        <path d="M9.5824 8.29376V9.50376H5V8.29376H9.5824Z" fill="currentColor" />
-        <path d="M14.6647 15.6852H10.0338C10.3878 15.3751 10.7567 15.0517 11.0772 14.7706C11.2531 14.6164 11.414 14.4746 11.5511 14.3547H14.6647V15.6852Z" fill="currentColor" />
-        <path d="M8.14852 14.1308L7.33925 15.4976C7.22458 15.6912 7.42245 15.9194 7.63037 15.8333L9.09785 15.2254L15.0399 10.0719L14.0905 8.97733L8.14852 14.1308Z" fill="currentColor" />
+        <path
+          d="M8.08887 0.251709C8.20479 0.23085 8.32486 0.241168 8.43652 0.282959L15.0215 2.75171C15.2787 2.84819 15.4492 3.09414 15.4492 3.3689V7.0105C15.4492 7.10986 15.4441 7.2081 15.4414 7.30542C15.0285 7.07175 14.5905 6.87675 14.1309 6.73022V3.82495L8.20508 1.60327L2.2793 3.82495V7.0105C2.27936 9.7171 3.4745 11.5379 5.02734 12.7947C5.01025 12.9942 5 13.1962 5 13.4001C5.00001 13.7617 5.02722 14.1169 5.08008 14.4636C2.91555 13.0393 0.961014 10.752 0.960938 7.0105V3.3689C0.960938 3.09417 1.13146 2.84821 1.38867 2.75171L7.97461 0.282959C8.01261 0.268728 8.05076 0.258321 8.08887 0.251709Z"
+          fill="currentColor"
+        />
+        <path
+          d="M11.3525 5.64688V6.85688H5V5.64688H11.3525Z"
+          fill="currentColor"
+        />
+        <path
+          d="M9.5824 8.29376V9.50376H5V8.29376H9.5824Z"
+          fill="currentColor"
+        />
+        <path
+          d="M14.6647 15.6852H10.0338C10.3878 15.3751 10.7567 15.0517 11.0772 14.7706C11.2531 14.6164 11.414 14.4746 11.5511 14.3547H14.6647V15.6852Z"
+          fill="currentColor"
+        />
+        <path
+          d="M8.14852 14.1308L7.33925 15.4976C7.22458 15.6912 7.42245 15.9194 7.63037 15.8333L9.09785 15.2254L15.0399 10.0719L14.0905 8.97733L8.14852 14.1308Z"
+          fill="currentColor"
+        />
       </svg>
     );
   }
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path d={permissionShieldOutline} stroke="currentColor" strokeWidth="1.31831" strokeLinejoin="round" />
+      <path
+        d={permissionShieldOutline}
+        stroke="currentColor"
+        strokeWidth="1.31831"
+        strokeLinejoin="round"
+      />
       {value === "danger-full-access" ? (
         <>
-          <path d="M9.10094 4.5V8.75939H7.59888V4.5H9.10094Z" fill="currentColor" />
-          <path d="M9.10094 9.8114V11.5H7.59888V9.8114H9.10094Z" fill="currentColor" />
+          <path
+            d="M9.10094 4.5V8.75939H7.59888V4.5H9.10094Z"
+            fill="currentColor"
+          />
+          <path
+            d="M9.10094 9.8114V11.5H7.59888V9.8114H9.10094Z"
+            fill="currentColor"
+          />
         </>
       ) : (
-        <path d="M12.1654 5.7552L8.9447 9.41475C8.73044 9.65816 8.53628 9.8804 8.35774 10.0423C8.1713 10.2114 7.94235 10.3717 7.64016 10.4254C7.48207 10.4535 7.32 10.4552 7.16151 10.4294C6.85843 10.3801 6.62728 10.2223 6.43836 10.0559C6.25752 9.89653 6.06037 9.67732 5.84264 9.43705L4.72925 8.20897L5.63557 7.38707L6.74897 8.61594C6.98603 8.87755 7.12974 9.03533 7.24673 9.13839C7.31033 9.19443 7.34485 9.21476 7.35823 9.22122C7.38068 9.22484 7.40352 9.22515 7.42593 9.22122C7.40522 9.22502 7.42893 9.23294 7.53583 9.136C7.65132 9.03126 7.79316 8.87139 8.02643 8.60638L11.2479 4.94763L12.1654 5.7552Z" fill="currentColor" />
+        <path
+          d="M12.1654 5.7552L8.9447 9.41475C8.73044 9.65816 8.53628 9.8804 8.35774 10.0423C8.1713 10.2114 7.94235 10.3717 7.64016 10.4254C7.48207 10.4535 7.32 10.4552 7.16151 10.4294C6.85843 10.3801 6.62728 10.2223 6.43836 10.0559C6.25752 9.89653 6.06037 9.67732 5.84264 9.43705L4.72925 8.20897L5.63557 7.38707L6.74897 8.61594C6.98603 8.87755 7.12974 9.03533 7.24673 9.13839C7.31033 9.19443 7.34485 9.21476 7.35823 9.22122C7.38068 9.22484 7.40352 9.22515 7.42593 9.22122C7.40522 9.22502 7.42893 9.23294 7.53583 9.136C7.65132 9.03126 7.79316 8.87139 8.02643 8.60638L11.2479 4.94763L12.1654 5.7552Z"
+          fill="currentColor"
+        />
       )}
     </svg>
   );
@@ -637,13 +1286,28 @@ const PermissionSelectorAction: FC = () => {
     if (value === "read-only") return "Read Only";
     if (value === "workspace-write") return "Workspace Write";
     if (value === "danger-full-access") return "Full access";
-    return value.replace(/(^|-)([a-z])/g, (_, _dash, letter) => ` ${letter.toUpperCase()}`).trim();
+    return value
+      .replace(
+        /(^|-)([a-z])/g,
+        (_, _dash, letter) => ` ${letter.toUpperCase()}`,
+      )
+      .trim();
   };
   const iconOf = (value: string) => <PermissionGlyph value={value} />;
   const options: SelectOption[] = permissions.options.map((option) => ({
     value: option.value,
-    label: <span className="flex items-center gap-2">{iconOf(option.value)}{labelOf(option.value)}</span>,
-    triggerLabel: <span className="flex items-center gap-1.5">{iconOf(option.value)}{labelOf(option.value)}</span>,
+    label: (
+      <span className="flex items-center gap-2">
+        {iconOf(option.value)}
+        {labelOf(option.value)}
+      </span>
+    ),
+    triggerLabel: (
+      <span className="flex items-center gap-1.5">
+        {iconOf(option.value)}
+        {labelOf(option.value)}
+      </span>
+    ),
   }));
   const current = permissions.currentValue;
 
@@ -669,12 +1333,24 @@ const PermissionSelectorAction: FC = () => {
           <DialogHeader>
             <DialogTitle>Enable Full access?</DialogTitle>
             <DialogDescription id="full-access-description">
-              Full access allows the agent to modify files and execute commands without the usual confirmation steps. Only enable it for tasks you trust.
+              Full access allows the agent to modify files and execute commands
+              without the usual confirmation steps. Only enable it for tasks you
+              trust.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPendingFullAccess(false)}>Cancel</Button>
-            <Button onClick={() => { setPendingFullAccess(false); void setPermissionPreset("danger-full-access"); }}>
+            <Button
+              variant="outline"
+              onClick={() => setPendingFullAccess(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                setPendingFullAccess(false);
+                void setPermissionPreset("danger-full-access");
+              }}
+            >
               Enable Full access
             </Button>
           </DialogFooter>
@@ -687,26 +1363,67 @@ const PermissionSelectorAction: FC = () => {
 const ModelSelectorAction: FC = () => {
   const hostModel = useDsh((s) => s.host?.model);
   const modelCatalogGroups = useDsh((s) => s.modelCatalogGroups);
+  const selectedProvider = useDsh((s) => s.selectedProvider);
   const selectedModel = useDsh((s) => s.selectedModel);
   const selectedReasoningEffort = useDsh((s) => s.selectedReasoningEffort);
+  const modelRoutable = useDsh((s) => s.modelRoutable);
   const setModelSelection = useDsh((s) => s.setModelSelection);
 
   const groups = modelCatalogGroups.length
     ? modelCatalogGroups
     : hostModel
-      ? [{ id: "default", name: "Models", models: [{ id: hostModel, name: hostModel }] }]
+      ? [
+          {
+            id: "default",
+            name: "Models",
+            models: [{ id: hostModel, name: hostModel }],
+          },
+        ]
       : [];
-  const models = groups.flatMap((group) => group.models.map((model) => ({
-    id: `${group.id}/${model.id}`,
-    group: group.name,
-    name: model.name,
-    description: model.description,
-    efforts: model.reasoning?.efforts,
-  })));
+  const catalogModels = groups.flatMap((group) =>
+    group.models.map((model) => ({
+      id: `${group.id}/${model.id}`,
+      provider: group.id,
+      model: model.id,
+      group: group.name,
+      name: model.name,
+      description: model.description,
+      defaultEffort: model.reasoning?.defaultEffort,
+      efforts: model.reasoning?.efforts,
+    })),
+  );
+  const currentProvider = selectedProvider ?? "";
+  const currentModel = selectedModel ?? hostModel;
+  const models =
+    currentProvider &&
+    currentModel &&
+    !catalogModels.some(
+      (model) =>
+        model.provider === currentProvider && model.model === currentModel,
+    )
+      ? [
+          ...catalogModels,
+          {
+            id: `${currentProvider}/${currentModel}`,
+            provider: currentProvider,
+            model: currentModel,
+            group: "Unavailable",
+            name: currentModel,
+            description: "The selected model is currently unavailable",
+            defaultEffort: undefined,
+            efforts: undefined,
+            disabled: true,
+          },
+        ]
+      : catalogModels;
   if (!models.length) return null;
 
-  const selected = models.find((model) => model.id.endsWith(`/${selectedModel ?? hostModel}`)) ?? models[0];
-  const modelId = selected.id.split("/").slice(1).join("/");
+  const selected =
+    models.find(
+      (model) =>
+        model.provider === selectedProvider &&
+        model.model === (selectedModel ?? hostModel),
+    ) ?? models[0];
   return (
     <ModelSelector
       models={models}
@@ -714,9 +1431,13 @@ const ModelSelectorAction: FC = () => {
       effort={selectedReasoningEffort}
       onValueChange={(value) => {
         const next = models.find((model) => model.id === value);
-        if (next) void setModelSelection(next.id.split("/").slice(1).join("/"));
+        if (next?.provider && next.model)
+          void setModelSelection(next.provider, next.model, next.defaultEffort);
       }}
-      onEffortChange={(effort) => void setModelSelection(modelId, effort)}
+      onEffortChange={(effort) => {
+        if (selected.provider && selected.model)
+          void setModelSelection(selected.provider, selected.model, effort);
+      }}
       variant="ghost"
       size="sm"
       searchable={models.length > 6}
@@ -737,7 +1458,12 @@ const PlanModeAction: FC = () => {
   return (
     <button
       type="button"
-      className={cn("h-7 rounded-full border px-2.5 text-xs transition-colors", active ? "border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300" : "text-muted-foreground hover:bg-muted")}
+      className={cn(
+        "h-7 rounded-full border px-2.5 text-xs transition-colors",
+        active
+          ? "border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+          : "text-muted-foreground hover:bg-muted",
+      )}
       aria-pressed={active}
       title={active ? "Disable plan mode" : "Enable plan mode"}
       onClick={() => void executeCommand(active ? "/plan off" : "/plan")}
@@ -748,6 +1474,7 @@ const PlanModeAction: FC = () => {
 };
 
 const ComposerAction: FC = () => {
+  const modelRoutable = useDsh((s) => s.modelRoutable);
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
       <div className="flex items-center gap-1.5">
@@ -793,6 +1520,7 @@ const ComposerAction: FC = () => {
         <AuiIf condition={(s) => !s.thread.isRunning}>
           <ComposerPrimitive.Send asChild>
             <TooltipIconButton
+              disabled={modelRoutable === false}
               tooltip="Send message"
               side="bottom"
               type="button"
@@ -864,20 +1592,18 @@ const AssistantMessage: FC = () => {
           {({ part, children }) => {
             switch (part.type) {
               case "group-chainOfThought":
-                return <div data-slot="aui_chain-of-thought">{children}</div>;
+                return (
+                  <ChainOfThought indices={part.indices}>
+                    {children}
+                  </ChainOfThought>
+                );
               case "group-tool":
+                // 不要 tool-group 折叠手风琴：默认把工具直接展开平铺。
+                // 保留可选 ToolGroup 覆盖槽位，外部显式提供时才用。
                 if (ToolGroup) {
                   return <ToolGroup group={part}>{children}</ToolGroup>;
                 }
-                return (
-                  <ToolGroupRoot variant="ghost">
-                    <ToolGroupTrigger
-                      count={part.indices.length}
-                      active={part.status.type === "running"}
-                    />
-                    <ToolGroupContent>{children}</ToolGroupContent>
-                  </ToolGroupRoot>
-                );
+                return <>{children}</>;
               case "group-reasoning": {
                 if (ReasoningGroup) {
                   return (
@@ -901,18 +1627,93 @@ const AssistantMessage: FC = () => {
               case "tool-call":
                 return part.toolUI ?? <ToolFallbackComponent {...part} />;
               case "data":
+                if (part.name === "dsh-command") {
+                  const command =
+                    (part as {
+                      data?: {
+                        commandName?: string | null;
+                        outcome?: {
+                          kind?: "success" | "error";
+                          text?: string;
+                        } | null;
+                      };
+                    }).data ?? {};
+                  const running = command.outcome == null;
+                  const failed = command.outcome?.kind === "error";
+                  const summary = running
+                    ? "Running command"
+                    : command.outcome?.text ??
+                      (failed ? "Command failed" : "Command completed");
+                  return (
+                    <div
+                      data-slot="aui_command"
+                      data-state={running ? "running" : failed ? "error" : "complete"}
+                      className="border-border/50 bg-muted/25 my-1 flex min-h-8 items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs"
+                      role="status"
+                    >
+                      {running ? (
+                        <LoaderCircleIcon className="text-muted-foreground size-3.5 shrink-0 animate-spin" />
+                      ) : (
+                        <TerminalIcon
+                          className={cn(
+                            "size-3.5 shrink-0",
+                            failed ? "text-destructive" : "text-muted-foreground",
+                          )}
+                        />
+                      )}
+                      <span className="font-medium">
+                        {command.commandName ?? "command"}
+                      </span>
+                      <span
+                        className={cn(
+                          "min-w-0 flex-1 truncate",
+                          failed ? "text-destructive" : "text-muted-foreground",
+                        )}
+                        title={summary}
+                      >
+                        {summary}
+                      </span>
+                    </div>
+                  );
+                }
                 // dsh 上下文注入（runtime context / skill 目录等）：模型可见、用户弱化，
                 // 折叠为一行小字（官方 ContextMessageNode 语义）。
                 if (part.name === "dsh-context") {
-                  const ctx = (part as { data?: { label?: string; text?: string } }).data ?? {};
+                  const ctx =
+                    (part as { data?: { label?: string; text?: string } })
+                      .data ?? {};
                   return (
                     <div
                       data-slot="aui_context-injection"
                       className="text-muted-foreground/70 border-border/40 my-0.5 rounded border-l-2 border-dashed px-2 py-0.5 text-xs leading-relaxed"
                       title={ctx.text}
                     >
-                      <span className="font-medium">📎 {ctx.label ?? "context"}</span>
-                      <span className="ms-1.5 line-clamp-1">{ctx.text ?? ""}</span>
+                      <span className="font-medium">
+                        📎 {ctx.label ?? "context"}
+                      </span>
+                      <span className="ms-1.5 line-clamp-1">
+                        {ctx.text ?? ""}
+                      </span>
+                    </div>
+                  );
+                }
+                // 兜底：未走到 ThreadMessage 拦截路径时（如 id 查找失败），也把
+                // steering 渲染成独立紧凑行，绝不落成普通 user / assistant 正文。
+                if (part.name === "dsh-steering") {
+                  const steering = (part as { data?: { text?: string } }).data ?? {};
+                  return (
+                    <div
+                      data-slot="aui_steering-row"
+                      data-role="steering"
+                      className="border-border/50 bg-muted/20 my-1 flex items-start gap-2 rounded-md border-l-2 border-dashed px-2.5 py-1.5 text-xs"
+                    >
+                      <span className="text-muted-foreground flex shrink-0 items-center gap-1 font-medium">
+                        <ArrowUpRightIcon className="size-3" />
+                        Steering
+                      </span>
+                      <span className="text-foreground min-w-0 flex-1 leading-relaxed break-words whitespace-pre-wrap">
+                        {steering.text ?? ""}
+                      </span>
                     </div>
                   );
                 }
@@ -1066,9 +1867,12 @@ const EditComposer: FC = () => {
       className="flex flex-col px-2 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
     >
       <ComposerPrimitive.Root className="aui-edit-composer-root border-border/60 dark:border-muted-foreground/15 ms-auto flex w-full max-w-[85%] flex-col rounded-(--composer-radius) border bg-(--composer-bg) shadow-[0_4px_16px_-8px_rgba(0,0,0,0.08),0_1px_2px_rgba(0,0,0,0.04)] dark:shadow-none">
-        <ComposerPrimitive.Input
-          className="aui-edit-composer-input text-foreground min-h-14 w-full resize-none bg-transparent px-4 pt-3 pb-1 text-base outline-none"
+        <LexicalComposerInput
+          className="aui-edit-composer-input text-foreground min-h-14 w-full bg-transparent px-4 pt-3 pb-1 text-sm outline-none"
           autoFocus
+          submitMode="enter"
+          cancelOnEscape
+          aria-label="Edit message"
         />
         <div className="aui-edit-composer-footer mx-2.5 mb-2.5 flex items-center gap-1.5 self-end">
           <ComposerPrimitive.Cancel asChild>

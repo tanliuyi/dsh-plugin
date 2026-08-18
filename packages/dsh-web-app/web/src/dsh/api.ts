@@ -1,33 +1,69 @@
 /** DSH /api 传输客户端：POST /api/<method> 一元 RPC + POST /api/respond。 */
 
-export type RpcResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } }
+/**
+ * RpcResult 判别联合。ok:true 路径的 `value` 按契约必须存在，但运行时允许 JSON 省略
+ * `value`（live host 的 `commands/execute` 对 unknown 命令返回 `result:{ok:true}`），
+ * 客户端把省略后的 undefined 当作 admission miss。类型保留 `value: T` 让常规调用点
+ * 无需判空；需要容忍缺省值的调用点用 `T = X | undefined` 并显式检查。
+ */
+export type RpcResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string; details?: unknown } }
+
+const DEFAULT_RPC_TIMEOUT_MS = 30_000
 
 function newRpcId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `rpc-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
-/** 发起一元调用，返回 result 槽。 */
-export async function rpc<T>(method: string, payload: unknown = {}): Promise<RpcResult<T>> {
-  const rpcId = newRpcId()
-  const res = await fetch(`/api/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId, method, payload }),
-  })
-  if (res.status === 403) throw new Error(`/api/${method}: 403 forbidden (trust fence)`)
-  if (res.status === 404) throw new Error(`/api/${method}: 404 not found`)
-  const body = (await res.json()) as { type: string; rpcId: string; result: RpcResult<T> }
-  if (body?.type !== 'server-response') throw new Error(`/api/${method}: unexpected response`)
-  return body.result
+function requestSignal(signal?: AbortSignal, timeoutMs = DEFAULT_RPC_TIMEOUT_MS): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs)
+  return signal === undefined ? timeout : AbortSignal.any([timeout, signal])
 }
 
-/** 对 server-request（审批/提问）应答。 */
-export async function respond(rpcId: string, result: { ok: boolean; value?: unknown; error?: unknown }): Promise<void> {
-  await fetch('/api/respond', {
+function isRpcResult<T>(value: unknown): value is RpcResult<T> {
+  if (typeof value !== 'object' || value === null || typeof (value as { ok?: unknown }).ok !== 'boolean') return false
+  // ok:true 允许不带 value（live host 的 commands/execute 对 unknown 命令返回
+  // result:{ok:true}）；调用点把省略的 value 当 admission miss 处理。
+  if ((value as { ok: boolean }).ok) return true
+  const error = (value as { error?: unknown }).error
+  return typeof error === 'object' && error !== null && typeof (error as { code?: unknown }).code === 'string' && typeof (error as { message?: unknown }).message === 'string'
+}
+
+async function postJson(path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
+  const response = await fetch(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-response', rpcId, result }),
+    body: JSON.stringify(body),
+    signal: requestSignal(signal),
   })
+  if (!response.ok) throw new Error(`transport failure for ${path}: HTTP ${response.status}`)
+  return response
+}
+
+/** 发起有界一元调用，校验 envelope、rpcId 回显和 RpcResult 结构。 */
+export async function rpc<T>(method: string, payload: unknown = {}, signal?: AbortSignal): Promise<RpcResult<T>> {
+  const rpcId = newRpcId()
+  const path = `/api/${method}`
+  const response = await postJson(path, { type: 'client-request', rpcId, method, payload }, signal)
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch (cause) {
+    throw new Error(`${path}: invalid JSON response`, { cause })
+  }
+  if (typeof body !== 'object' || body === null || (body as { type?: unknown }).type !== 'server-response') {
+    throw new Error(`${path}: unexpected response envelope`)
+  }
+  if ((body as { rpcId?: unknown }).rpcId !== rpcId) {
+    throw new Error(`${path}: rpcId mismatch`)
+  }
+  const result = (body as { result?: unknown }).result
+  if (!isRpcResult<T>(result)) throw new Error(`${path}: invalid RPC result`)
+  return result
+}
+
+/** 对 server-request（审批/提问）应答；非 2xx 必须保留待处理交互。 */
+export async function respond(rpcId: string, result: { ok: boolean; value?: unknown; error?: unknown }, signal?: AbortSignal): Promise<void> {
+  await postJson('/api/respond', { type: 'client-response', rpcId, result }, signal)
 }
 
 // ── 常用契约类型（骨架最小集） ──────────────────────────────────────────────
@@ -51,19 +87,23 @@ export interface PermissionSelect {
   options: PermissionOption[]
 }
 
+export interface ProjectionBaseline {
+  asOfSeq: number
+  values: {
+    title?: unknown
+    permissions?: PermissionSelect
+    contextPressure?: ContextPressureProjection
+    contextBreakdown?: ContextBreakdownProjection
+    goal?: GoalProjection | null
+    [key: string]: unknown
+  }
+}
+
 export interface SessionSummary {
   sessionId: string
   /** Durable title projected by the host session-title service. */
   title?: string
-  projections?: {
-    values?: {
-      title?: unknown
-      permissions?: PermissionSelect
-      contextPressure?: ContextPressureProjection
-      contextBreakdown?: ContextBreakdownProjection
-      goal?: GoalProjection | null
-    }
-  }
+  projections?: ProjectionBaseline
   parentSessionId?: string
   origin?: 'subagent'
   updatedAt: number
@@ -253,6 +293,14 @@ export interface CommandEntry {
   description?: string
   input?: { hint?: string }
 }
+
+/** skill.list 目录行（对齐上游 skills.ts：/name 引用、modelInvocable 标记）。 */
+export interface SkillEntry {
+  name: string
+  description: string
+  whenToUse?: string
+  modelInvocable: boolean
+}
 export interface AgentPresetEntry {
   id: string
   trust: 'system' | 'user'
@@ -286,10 +334,35 @@ export type ApprovalRequest = {
   reason?: string
 }
 
+/** 上游 question.ask 单个选项（对齐 @deepseek-ai/dsh-client-ui-user-questions 的公开契约）。 */
+export interface QuestionOption {
+  label: string
+  description?: string
+}
+
+/** 上游 question 的呈现意图：plan-review 让唯一问题渲染成一张批准决策卡，approve 指名哪个选项表示批准。 */
+export interface QuestionPlanReviewIntent {
+  kind: 'plan-review'
+  approve: string
+}
+
+export type QuestionIntent = QuestionPlanReviewIntent
+
+/** question/requested 载荷里的一条问题（对齐上游 ui-user-questions contract/slots.ts 的 QuestionItem）。 */
+export interface Question {
+  id: string
+  header?: string
+  question: string
+  detail?: string
+  options?: QuestionOption[]
+  multiSelect?: boolean
+  intent?: QuestionIntent
+}
+
 export type QuestionRequest = {
   type: 'question/requested'
   sessionId: string
-  questions: unknown[]
+  questions: Question[]
 }
 
 export interface PendingInteraction {

@@ -4,6 +4,7 @@ import { useDsh } from './dsh/store'
 import { connectDownlinks } from './dsh/stream'
 import { TooltipIconButton } from './components/assistant-ui/tooltip-icon-button'
 import { SettingsDialog } from './components/settings-dialog'
+import { ConversationHeader } from './components/conversation-header'
 import { Thread } from './components/assistant-ui/thread'
 import { ThreadList } from './components/assistant-ui/thread-list'
 import { DshRuntimeProvider } from './runtime/DshRuntime'
@@ -40,7 +41,7 @@ function App() {
       >
         <ThreadList />
       </div>
-      <main className="relative min-h-0 min-w-0 overflow-hidden">
+      <main className="relative flex min-h-0 min-w-0 flex-col overflow-hidden">
         <TooltipIconButton
           tooltip="Open workspace sidebar"
           type="button"
@@ -65,11 +66,16 @@ function App() {
           <Settings2Icon className="size-4" />
         </TooltipIconButton>
         {error && (
-          <div role="alert" className="absolute inset-x-0 top-0 z-50 border-b border-destructive/40 bg-destructive/10 px-4 py-1.5 text-sm text-destructive">
+          <div role="alert" className="absolute inset-x-0 top-0 z-50 border-b border-destructive/40 bg-destructive/10 px-4 py-1.5 text-destructive">
             {error}
           </div>
         )}
-        <Thread />
+        <div className="flex min-h-0 flex-1 flex-col">
+          <ConversationHeader />
+          <div className="min-h-0 flex-1">
+            <Thread />
+          </div>
+        </div>
         <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       </main>
     </div>

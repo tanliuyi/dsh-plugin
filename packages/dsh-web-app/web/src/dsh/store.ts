@@ -118,7 +118,7 @@ async function goalRpc(method: string, payload: unknown): Promise<void> {
 }
 
 let openSessionGeneration = 0
-let createSessionInFlight: Promise<void> | null = null
+let createSessionInFlight: Promise<string | null> | null = null
 let bootInFlight: Promise<void> | null = null
 const commandLoads = new Map<string, Promise<CommandEntry[]>>()
 const skillLoads = new Map<string, Promise<void>>()
@@ -193,10 +193,10 @@ interface DshState {
   loadingHistory: boolean
   error: string | null
   pendingInteractions: PendingInteraction[]
-  boot: () => Promise<void>
+  boot: (preferredSessionId?: string) => Promise<void>
   refreshSessions: () => Promise<void>
   openSession: (sessionId: string) => Promise<void>
-  createSession: (forceNew?: boolean) => Promise<void>
+  createSession: (forceNew?: boolean) => Promise<string | null>
   addWorkspace: () => Promise<void>
   renameWorkspace: (workspaceId: string, title: string) => Promise<void>
   deleteWorkspace: (workspaceId: string) => Promise<void>
@@ -271,7 +271,7 @@ export const useDsh = create<DshState>((set, get) => ({
   loadingHistory: false,
   error: null,
   pendingInteractions: [],
-  boot: async () => {
+  boot: async (preferredSessionId) => {
     if (bootInFlight) return bootInFlight
     const operation = (async () => {
       try {
@@ -297,8 +297,12 @@ export const useDsh = create<DshState>((set, get) => ({
         }
         await get().refreshSessions()
         const restoredSessionId = get().currentSessionId
-        if (restoredSessionId && get().sessions.some((session) => session.sessionId === restoredSessionId)) {
-          await get().openSession(restoredSessionId)
+        const preferred = preferredSessionId && get().sessions.some((session) => session.sessionId === preferredSessionId)
+          ? preferredSessionId
+          : null
+        const initialSessionId = preferred ?? restoredSessionId
+        if (initialSessionId && get().sessions.some((session) => session.sessionId === initialSessionId)) {
+          await get().openSession(initialSessionId)
         } else {
           // 无有效 restored id：先清掉陈旧/缺失的 id，再复用当前 workspace 的 blank session
           // （上游 blank composer 已绑定可复用 blank session），否则新建并 open。
@@ -479,7 +483,7 @@ export const useDsh = create<DshState>((set, get) => ({
   async createSession(forceNew = false) {
     if (createSessionInFlight) return createSessionInFlight
 
-    const operation = (async () => {
+    const operation = (async (): Promise<string | null> => {
       const state = get()
       const workspace = state.workspaces.find((item) => item.workspaceId === state.newSessionWorkspaceId)
       const reusable = forceNew ? undefined : state.sessions.find((session) =>
@@ -491,20 +495,21 @@ export const useDsh = create<DshState>((set, get) => ({
       )
       if (reusable) {
         await get().openSession(reusable.sessionId)
-        return
+        return reusable.sessionId
       }
 
       const result = await rpc<{ sessionId: string }>('session.create', {
         ...(state.newSessionWorkspaceId ? { workspaceId: state.newSessionWorkspaceId } : {}),
         ...(state.newSessionAgentPreset ? { agentPreset: state.newSessionAgentPreset } : {}),
       })
-      if (!result.ok) return
+      if (!result.ok) return null
       await get().refreshSessions()
       await get().openSession(result.value.sessionId)
+      return result.value.sessionId
     })()
     createSessionInFlight = operation
     try {
-      await operation
+      return await operation
     } finally {
       if (createSessionInFlight === operation) createSessionInFlight = null
     }

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { useThreadNavigation } from "@/router-navigation";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -58,9 +59,19 @@ export const ThreadList: FC = () => {
 
   return (
     <ThreadListRoot>
-      <div data-slot="aui_thread-list-toolbar" className="flex h-8 items-center justify-between px-2.5">
+      <div>
+          <h1>DeepSeek</h1>
+        </div>
+      <div
+        data-slot="aui_thread-list-toolbar"
+        className="flex h-8 items-center justify-between px-2.5"
+      >
+        
         <h2 className="text-sm font-medium text-foreground">工作区</h2>
-        <div data-slot="aui_thread-list-toolbar-actions" className="flex items-center gap-0.5">
+        <div
+          data-slot="aui_thread-list-toolbar-actions"
+          className="flex items-center gap-0.5"
+        >
           <TooltipIconButton
             tooltip="Search threads"
             type="button"
@@ -122,7 +133,9 @@ const ThreadListViewControls: FC = () => {
           value={groupBy}
           onValueChange={(value) => setGroupBy(value as typeof groupBy)}
         >
-          <DropdownMenuRadioItem value="workspace">按工作区</DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="workspace">
+            按工作区
+          </DropdownMenuRadioItem>
           <DropdownMenuRadioItem value="flat">列表</DropdownMenuRadioItem>
         </DropdownMenuRadioGroup>
         <DropdownMenuSeparator />
@@ -132,7 +145,9 @@ const ThreadListViewControls: FC = () => {
           onValueChange={(value) => setOrderBy(value as typeof orderBy)}
         >
           <DropdownMenuRadioItem value="manual">手动排序</DropdownMenuRadioItem>
-          <DropdownMenuRadioItem value="updated">最近更新</DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="updated">
+            最近更新
+          </DropdownMenuRadioItem>
         </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -186,7 +201,10 @@ export const ThreadListItems: FC<
   return (
     <div
       data-slot="aui_thread-list-items"
-      className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain -me-2 pe-2", className)}
+      className={cn(
+        "min-h-0 flex-1 overflow-y-auto overscroll-contain -me-2 pe-2",
+        className,
+      )}
       {...props}
     >
       <AuiIf condition={(s) => s.threads.isLoading}>
@@ -198,6 +216,9 @@ export const ThreadListItems: FC<
     </div>
   );
 };
+
+const INITIAL_THREAD_COUNT = 5;
+const THREAD_COUNT_INCREMENT = 10;
 
 const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   searchQuery = "",
@@ -211,9 +232,28 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   const setNewSessionWorkspace = useDsh((s) => s.setNewSessionWorkspace);
   const threadIds = useAuiState((s) => s.threads.threadIds);
   const query = searchQuery.trim().toLowerCase();
-  const openSession = useDsh((s) => s.openSession);
-  const [remoteResults, setRemoteResults] = useState<Array<{ sessionId: string; snippet: string }>>([]);
+  const navigateToThread = useThreadNavigation();
+  const [remoteResults, setRemoteResults] = useState<
+    Array<{ sessionId: string; snippet: string }>
+  >([]);
   const [remoteLoading, setRemoteLoading] = useState(false);
+  const [visibleThreadCounts, setVisibleThreadCounts] = useState<
+    Record<string, number>
+  >({});
+
+  const expandThreads = (groupKey: string) => {
+    setVisibleThreadCounts((current) => ({
+      ...current,
+      [groupKey]:
+        (current[groupKey] ?? INITIAL_THREAD_COUNT) + THREAD_COUNT_INCREMENT,
+    }));
+  };
+  const collapseThreads = (groupKey: string) => {
+    setVisibleThreadCounts((current) => ({
+      ...current,
+      [groupKey]: INITIAL_THREAD_COUNT,
+    }));
+  };
 
   useEffect(() => {
     if (query.length < 2) {
@@ -223,7 +263,10 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setRemoteLoading(true);
-      void rpc<{ items: Array<{ sessionId: string; snippet: string }>; hasMore: boolean }>("session.search", { query })
+      void rpc<{
+        items: Array<{ sessionId: string; snippet: string }>;
+        hasMore: boolean;
+      }>("session.search", { query })
         .then((result) => {
           if (!cancelled) setRemoteResults(result.ok ? result.value.items : []);
         })
@@ -303,10 +346,15 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   };
 
   if (query) {
-    const remoteOnly = remoteResults.filter((result) => !filteredIds.includes(result.sessionId));
+    const remoteOnly = remoteResults.filter(
+      (result) => !filteredIds.includes(result.sessionId),
+    );
     if (filteredIds.length === 0 && remoteOnly.length === 0) {
       return (
-        <div data-slot="aui_thread-list-empty" className="text-muted-foreground px-2.5 py-4 text-sm">
+        <div
+          data-slot="aui_thread-list-empty"
+          className="text-muted-foreground px-2.5 py-4 text-sm"
+        >
           {remoteLoading ? "Searching sessions…" : "No threads found"}
         </div>
       );
@@ -318,10 +366,14 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
             key={result.sessionId}
             type="button"
             className="flex min-w-0 flex-col items-start rounded-md px-2.5 py-2 text-start hover:bg-muted"
-            onClick={() => void openSession(result.sessionId)}
+            onClick={() => void navigateToThread(result.sessionId)}
           >
-            <span className="w-full truncate text-sm text-foreground">{result.snippet || result.sessionId}</span>
-            <span className="w-full truncate text-xs text-muted-foreground">{result.sessionId}</span>
+            <span className="w-full truncate text-sm text-foreground">
+              {result.snippet || result.sessionId}
+            </span>
+            <span className="w-full truncate text-xs text-muted-foreground">
+              {result.sessionId}
+            </span>
           </button>
         ))}
         {filteredIds.map(renderItem)}
@@ -335,8 +387,20 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
 
   return (
     <>
-      {projection.groups.map((group) => (
-          <div key={group.key || "ungrouped"} data-slot="aui_thread-list-group" className="group/workspace">
+      {projection.groups.map((group) => {
+        const visibleThreadCount =
+          visibleThreadCounts[group.key] ?? INITIAL_THREAD_COUNT;
+        const visibleSessionIds = group.sessionIds.slice(0, visibleThreadCount);
+        const hasMoreThreads =
+          visibleSessionIds.length < group.sessionIds.length;
+        const hasExpandedThreads = visibleThreadCount > INITIAL_THREAD_COUNT;
+
+        return (
+          <div
+            key={group.key || "ungrouped"}
+            data-slot="aui_thread-list-group"
+            className="group/workspace"
+          >
             <div
               data-slot="aui_thread-list-group-trigger"
               role="button"
@@ -358,36 +422,69 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
                 <FolderOpenIcon className="size-3.5 shrink-0" />
               )}
               <span className="min-w-0 truncate">{group.label}</span>
-          <div data-slot="aui_thread-list-group-actions"
+              <div
+                data-slot="aui_thread-list-group-actions"
                 className="ms-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover/workspace:opacity-100 group-focus-within/workspace:opacity-100 group-has-data-[state=open]/workspace:opacity-100"
                 onClick={(event) => event.stopPropagation()}
                 onKeyDown={(event) => event.stopPropagation()}
               >
-                <WorkspaceGroupMore workspaceId={group.workspaceId} path={group.path ?? group.label} />
+                <WorkspaceGroupMore
+                  workspaceId={group.workspaceId}
+                  path={group.path ?? group.label}
+                />
                 <ThreadListNew
                   aria-label={`New thread in ${group.label}`}
                   tooltip={`New thread in ${group.label}`}
                   className="size-6 justify-center rounded-md p-0 text-muted-foreground"
                   onClick={() => {
-                    if (group.workspaceId) setNewSessionWorkspace(group.workspaceId);
+                    if (group.workspaceId)
+                      setNewSessionWorkspace(group.workspaceId);
                   }}
                 >
                   <PlusIcon className="size-3.5" />
                 </ThreadListNew>
-          </div>
-            </div>
-            {group.expanded && (group.sessionIds.length > 0 ? (
-              group.sessionIds.map(renderItem)
-            ) : (
-              <div
-                data-slot="aui_thread-list-group-empty"
-                className="text-muted-foreground px-2.5 py-2 text-xs"
-              >
-                没有会话
               </div>
-            ))}
+            </div>
+            {group.expanded &&
+              (group.sessionIds.length > 0 ? (
+                <>
+                  {visibleSessionIds.map(renderItem)}
+                  {(hasMoreThreads || hasExpandedThreads) && (
+                    <div className="flex items-center gap-3 ps-6 pe-2.5 py-1">
+                      {hasMoreThreads && (
+                        <button
+                          type="button"
+                          data-slot="aui_thread-list-expand-more"
+                          className="text-muted-foreground hover:text-foreground cursor-pointer px-0.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                          onClick={() => expandThreads(group.key)}
+                        >
+                          展开更多
+                        </button>
+                      )}
+                      {hasExpandedThreads && (
+                        <button
+                          type="button"
+                          data-slot="aui_thread-list-collapse"
+                          className="text-muted-foreground hover:text-foreground cursor-pointer px-0.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                          onClick={() => collapseThreads(group.key)}
+                        >
+                          收起
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div
+                  data-slot="aui_thread-list-group-empty"
+                  className="text-muted-foreground px-2.5 py-2 text-xs"
+                >
+                  没有会话
+                </div>
+              ))}
           </div>
-      ))}
+        );
+      })}
     </>
   );
 };
@@ -417,7 +514,10 @@ const copyWorkspacePath = async (path: string): Promise<void> => {
   }
 };
 
-const WorkspaceGroupMore: FC<{ workspaceId?: string; path: string }> = ({ workspaceId, path }) => {
+const WorkspaceGroupMore: FC<{ workspaceId?: string; path: string }> = ({
+  workspaceId,
+  path,
+}) => {
   const [open, setOpen] = useState(false);
   const renameWorkspace = useDsh((state) => state.renameWorkspace);
   const deleteWorkspace = useDsh((state) => state.deleteWorkspace);
@@ -447,22 +547,35 @@ const WorkspaceGroupMore: FC<{ workspaceId?: string; path: string }> = ({ worksp
         >
           复制工作区路径
         </DropdownMenuItem>
-         {workspaceId && (
-           <>
-             <DropdownMenuSeparator />
-             <DropdownMenuItem onSelect={() => {
-               const title = window.prompt("重命名工作区", path.split(/[\\\\/]/).filter(Boolean).pop() ?? "");
-               if (title?.trim()) void renameWorkspace(workspaceId, title).catch(() => {});
-             }}>
-               重命名
-             </DropdownMenuItem>
-             <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => {
-               if (window.confirm("移除工作区注册不会删除目录或会话。继续？")) void deleteWorkspace(workspaceId).catch(() => {});
-             }}>
-               移除工作区
-             </DropdownMenuItem>
-           </>
-         )}
+        {workspaceId && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => {
+                const title = window.prompt(
+                  "重命名工作区",
+                  path
+                    .split(/[\\\\/]/)
+                    .filter(Boolean)
+                    .pop() ?? "",
+                );
+                if (title?.trim())
+                  void renameWorkspace(workspaceId, title).catch(() => {});
+              }}
+            >
+              重命名
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-destructive focus:text-destructive"
+              onSelect={() => {
+                if (window.confirm("移除工作区注册不会删除目录或会话。继续？"))
+                  void deleteWorkspace(workspaceId).catch(() => {});
+              }}
+            >
+              移除工作区
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -470,7 +583,10 @@ const WorkspaceGroupMore: FC<{ workspaceId?: string; path: string }> = ({ worksp
 
 export const ThreadListNew = forwardRef<
   HTMLButtonElement,
-  ComponentPropsWithoutRef<typeof Button> & { labelClassName?: string; tooltip?: string }
+  ComponentPropsWithoutRef<typeof Button> & {
+    labelClassName?: string;
+    tooltip?: string;
+  }
 >(({ className, labelClassName, tooltip, children, ...props }, ref) => {
   const content = children ?? (
     <>
@@ -544,8 +660,12 @@ const ThreadListSkeleton: FC = () => {
 };
 
 export const ThreadListItem: FC = () => {
-  const isPendingRequest = useAuiState((s) => s.threadListItem.custom?.hasPendingRequest === true);
-  const isRunning = useAuiState((s) => s.threadListItem.custom?.running === true);
+  const isPendingRequest = useAuiState(
+    (s) => s.threadListItem.custom?.hasPendingRequest === true,
+  );
+  const isRunning = useAuiState(
+    (s) => s.threadListItem.custom?.running === true,
+  );
   const threadId = useAuiState((s) => s.threadListItem.id);
   const currentSessionId = useDsh((s) => s.currentSessionId);
   const isActive = currentSessionId === threadId;
@@ -577,13 +697,13 @@ export const ThreadListItem: FC = () => {
         <ThreadListItemPrimitive.Trigger
           ref={triggerRef}
           data-slot="aui_thread-list-item-trigger"
-          className="focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center rounded-md px-2.5 text-start text-sm outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 focus-visible:ring-[3px]"
+          className="focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center rounded-md px-3 text-start text-sm outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 focus-visible:ring-[3px]"
         >
           {isPendingRequest && (
             <CircleAlertIcon
               aria-hidden
               data-slot="aui_thread-list-item-pending-request"
-              className="text-warning me-1.5 size-3.5 shrink-0"
+              className="absolute left-0 text-warning me-1.5 size-3.5 shrink-0"
             />
           )}
           {!isPendingRequest && isRunning && (
@@ -606,7 +726,10 @@ export const ThreadListItem: FC = () => {
           ) : null}
         </ThreadListItemPrimitive.Trigger>
       )}
-      <ThreadListItemMore onRename={() => setIsRenaming(true)} isActive={isActive} />
+      <ThreadListItemMore
+        onRename={() => setIsRenaming(true)}
+        isActive={isActive}
+      />
     </ThreadListItemPrimitive.Root>
   );
 };
@@ -675,7 +798,10 @@ const ThreadListItemRename: FC<{
   );
 };
 
-const ThreadListItemMore: FC<{ onRename: () => void; isActive: boolean }> = ({ onRename, isActive }) => {
+const ThreadListItemMore: FC<{ onRename: () => void; isActive: boolean }> = ({
+  onRename,
+  isActive,
+}) => {
   return (
     <ThreadListItemMorePrimitive.Root sharedFocusGroup>
       <ThreadListItemMorePrimitive.Trigger asChild>
@@ -684,7 +810,6 @@ const ThreadListItemMore: FC<{ onRename: () => void; isActive: boolean }> = ({ o
           data-slot="aui_thread-list-item-more"
           className={cn(
             "data-[state=open]:bg-accent absolute end-1.5 top-1/2 size-6 -translate-y-1/2 p-0 opacity-0 group-hover:opacity-100 group-has-focus-visible:opacity-100 data-[state=open]:opacity-100",
-            isActive && "opacity-100",
           )}
         >
           <MoreHorizontalIcon className="size-3.5" />

@@ -11,6 +11,10 @@ import {
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
 import { type FC, memo, useState } from "react";
+
+interface MarkdownTextProps {
+  hideLoadingIndicator?: boolean;
+}
 import { CheckIcon, CopyIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
@@ -18,11 +22,16 @@ import { CodeDiff } from "@/components/elements/code-diff";
 import { parseUnifiedDiff } from "@/lib/unified-diff";
 import { cn } from "@/lib/utils";
 
-const MarkdownTextImpl = () => {
+const MarkdownTextImpl = ({
+  hideLoadingIndicator = false,
+}: MarkdownTextProps) => {
   return (
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm]}
       className="aui-md"
+      containerProps={
+        hideLoadingIndicator ? { "data-status": "complete" } : undefined
+      }
       components={markdownComponents}
       componentsByLanguage={{
         diff: {

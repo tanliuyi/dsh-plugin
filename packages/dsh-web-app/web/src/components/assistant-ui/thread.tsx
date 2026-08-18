@@ -9,16 +9,11 @@ import { File } from "@/components/assistant-ui/file";
 import { ChainOfThought } from "@/components/assistant-ui/chain-of-thought";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/follow-up-suggestions";
 import { Image } from "@/components/assistant-ui/image";
+import { GenerationLoader } from "@/components/elements/loading-state";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { PlanReviewPanel } from "@/components/assistant-ui/plan-review-panel";
-import {
-  Reasoning,
-  ReasoningContent,
-  ReasoningRoot,
-  ReasoningText,
-  ReasoningTrigger,
-} from "@/components/assistant-ui/reasoning";
-import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
+import { Reasoning } from "@/components/assistant-ui/reasoning";
+import { AssistantToolCall } from "@/components/assistant-ui/tool-call";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import {
   Dialog,
@@ -117,8 +112,8 @@ export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
  * Optional component overrides for the thread. `AssistantMessage` and
  * `Welcome` replace whole sections; the remaining slots override how the
  * assistant message renders tool calls and part groups. Tool UIs registered
- * by name (toolkit `render`, `useAssistantDataUI`) take precedence over
- * `ToolFallback`.
+ * by name (toolkit `render`, `useAssistantDataUI`) take precedence over the
+ * default Elements `ToolCall`; `ToolFallback` remains an explicit override.
  */
 export type ThreadComponents = {
   AssistantMessage?: ComponentType | undefined;
@@ -127,6 +122,12 @@ export type ThreadComponents = {
   ToolGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
     | undefined;
+  /**
+   * @deprecated Reasoning parts are no longer nested under a second-level
+   * "group-reasoning" group; they render directly inside the containing
+   * `ChainOfThought`. This slot is retained for external compatibility but is
+   * no longer invoked by the default thread.
+   */
   ReasoningGroup?:
     | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
     | undefined;
@@ -134,6 +135,11 @@ export type ThreadComponents = {
 
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
+};
+
+type ThreadRootProps = ThreadProps & {
+  sessionId?: string | undefined;
+  hydrated?: boolean | undefined;
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -149,10 +155,8 @@ const isNewChatView = (s: AssistantState) =>
 
 export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
   const booting = useDsh((s) => s.booting);
-  const loadingHistory = useDsh((s) => s.loadingHistory);
-  const isEmpty = useAuiState(isNewChatView);
 
-  if (booting || loadingHistory) {
+  if (booting) {
     return (
       <div
         data-slot="aui_thread-loading"
@@ -164,9 +168,24 @@ export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
     );
   }
 
+  return <ThreadRoot components={components} />;
+};
+
+/** Route-owned thread root; remounting it resets the viewport for each session. */
+export const ThreadRoot: FC<ThreadRootProps> = ({
+  components = EMPTY_COMPONENTS,
+  sessionId,
+  hydrated = true,
+}) => {
+  const currentSessionId = useDsh((s) => s.currentSessionId);
+  const loadingHistory = useDsh((s) => s.loadingHistory);
+  // An empty message buffer is an intermediate hydration state, not a new chat.
+  const sessionReady = sessionId === undefined || currentSessionId === sessionId;
+  const isEmpty = useAuiState(isNewChatView) && sessionReady && hydrated && !loadingHistory;
+
   return (
     <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot isEmpty={isEmpty} />
+      <ThreadRootContent isEmpty={isEmpty} />
     </ThreadComponentsContext.Provider>
   );
 };
@@ -209,6 +228,9 @@ const useInitialInstantBottom = () => {
     };
     const schedulePin = () => {
       if (stopped) return;
+      // ResizeObserver runs before paint. Pin synchronously so hydrated messages
+      // never render at the top for one frame before the next RAF catches up.
+      pinToBottom();
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         pinToBottom();
@@ -245,9 +267,10 @@ const useInitialInstantBottom = () => {
   return viewportRef;
 };
 
-const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
+const ThreadRootContent: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
   const viewportRef = useInitialInstantBottom();
+  const showNewChat = (state: AssistantState) => isEmpty && isNewChatView(state);
 
   return (
     <ThreadPrimitive.Root
@@ -274,7 +297,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             isEmpty && "justify-center",
           )}
         >
-          <AuiIf condition={isNewChatView}>
+          <AuiIf condition={showNewChat}>
             <Welcome />
           </AuiIf>
 
@@ -300,7 +323,7 @@ const ThreadRoot: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             <GoalBar />
             <QueueDock />
             <Composer />
-            <AuiIf condition={(s) => isNewChatView(s)}>
+            <AuiIf condition={showNewChat}>
               <div
                 data-slot="aui_thread-suggestions-spacer"
                 className="min-h-8"
@@ -960,6 +983,7 @@ const Composer: FC = () => {
   );
   const aui = useAui();
   const slash = useSlashCommands();
+  
   const handlePaste = async (event: ClipboardEvent<HTMLDivElement>) => {
     const files = Array.from(event.clipboardData.files);
     if (!aui.thread.getState().capabilities.attachments || files.length === 0)
@@ -1561,11 +1585,31 @@ const MessageError: FC = () => {
   );
 };
 
+const ThreadGenerationLoader: FC = () => {
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setTick((current) => current + 1);
+    }, 100);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  return (
+    <GenerationLoader
+      label="Generating"
+      tick={tick}
+      role="status"
+      aria-label="Assistant is working"
+      className="aui-assistant-message-indicator items-start"
+    />
+  );
+};
+
 const AssistantMessage: FC = () => {
   const {
-    ToolFallback: ToolFallbackComponent = ToolFallback,
+    ToolFallback: ToolFallbackComponent = AssistantToolCall,
     ToolGroup,
-    ReasoningGroup,
   } = useContext(ThreadComponentsContext);
 
   const ACTION_BAR_PT = "pt-1.5";
@@ -1583,8 +1627,9 @@ const AssistantMessage: FC = () => {
         className="text-foreground px-2 leading-relaxed wrap-break-word"
       >
         <MessagePrimitive.GroupedParts
+          indicator="always"
           groupBy={groupPartByType({
-            reasoning: ["group-chainOfThought", "group-reasoning"],
+            reasoning: ["group-chainOfThought"],
             "tool-call": ["group-chainOfThought", "group-tool"],
             "standalone-tool-call": [],
           })}
@@ -1604,22 +1649,6 @@ const AssistantMessage: FC = () => {
                   return <ToolGroup group={part}>{children}</ToolGroup>;
                 }
                 return <>{children}</>;
-              case "group-reasoning": {
-                if (ReasoningGroup) {
-                  return (
-                    <ReasoningGroup group={part}>{children}</ReasoningGroup>
-                  );
-                }
-                const running = part.status.type === "running";
-                return (
-                  <ReasoningRoot variant="ghost" streaming={running}>
-                    <ReasoningTrigger active={running} />
-                    <ReasoningContent aria-busy={running}>
-                      <ReasoningText>{children}</ReasoningText>
-                    </ReasoningContent>
-                  </ReasoningRoot>
-                );
-              }
               case "text":
                 return <MarkdownText />;
               case "reasoning":
@@ -1732,13 +1761,7 @@ const AssistantMessage: FC = () => {
                 );
               case "indicator":
                 return (
-                  <span
-                    data-slot="aui_assistant-message-indicator"
-                    className="animate-pulse font-sans"
-                    aria-label="Assistant is working"
-                  >
-                    {"●"}
-                  </span>
+                  <ThreadGenerationLoader />
                 );
               default:
                 return null;

@@ -11,7 +11,8 @@ export default defineConfig({
   root: src('.'),
   base: '/',
   resolve: {
-    dedupe: ['react', 'react-dom'],
+    // Keep assistant-ui context providers/hooks on one module instance.
+    dedupe: ['react', 'react-dom', '@assistant-ui/react', '@assistant-ui/core', '@assistant-ui/store'],
     alias: {
       '@': src('src'),
     },

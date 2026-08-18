@@ -16,6 +16,7 @@ import { resolveCommandDisposition, commandDraftOf } from '../dsh/commands'
 import { deriveThreadListProjection } from '../dsh/thread-list'
 import { useDsh } from '../dsh/store'
 import type { DshMessage } from '../dsh/messages'
+import { useThreadNavigation } from '../router-navigation'
 
 type ThreadContentPart = Exclude<NonNullable<ThreadMessageLike['content']>, string>[number]
 
@@ -163,6 +164,7 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
   const refreshSessions = useDsh((s) => s.refreshSessions)
   const renameSession = useDsh((s) => s.renameSession)
   const executeCommand = useDsh((s) => s.executeCommand)
+  const navigateToThread = useThreadNavigation()
 
   const converted = useExternalMessageConverter({
     callback: convertDshMessage,
@@ -177,8 +179,9 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
 
     let sessionId = useDsh.getState().currentSessionId
     if (sessionId === null) {
-      await createSession()
-      sessionId = useDsh.getState().currentSessionId
+      const createdSessionId = await createSession()
+      sessionId = createdSessionId ?? useDsh.getState().currentSessionId
+      if (createdSessionId !== null) await navigateToThread(createdSessionId)
     }
     if (sessionId === null) throw new Error('failed to create session')
 
@@ -218,7 +221,7 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
     if (session?.origin === 'subagent') await sendSubagentPrompt(session, parts)
     else await sendPrompt(sessionId, parts)
     markSessionActive(sessionId)
-  }, [createSession, executeCommand, markSessionActive])
+  }, [createSession, executeCommand, markSessionActive, navigateToThread])
 
   const onCancel = useCallback(async () => {
     if (currentSessionId === null) return
@@ -255,10 +258,11 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
       },
     })),
     onSwitchToThread: async (threadId) => {
-      await openSession(threadId)
+      await navigateToThread(threadId)
     },
     onSwitchToNewThread: async () => {
-      await createSession(true)
+      const createdSessionId = await createSession(true)
+      if (createdSessionId !== null) await navigateToThread(createdSessionId)
     },
     onRename: async (threadId, title) => {
       await renameSession(threadId, title)
@@ -273,7 +277,7 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
       if (!result.ok) throw new Error(result.error.message)
       await refreshSessions()
     },
-  }), [currentSessionId, projection.sessions, pendingInteractions, openSession, createSession, refreshSessions, renameSession])
+  }), [currentSessionId, projection.sessions, pendingInteractions, navigateToThread, createSession, refreshSessions, renameSession])
 
   const runtime = useExternalStoreRuntime({
     messages: converted,

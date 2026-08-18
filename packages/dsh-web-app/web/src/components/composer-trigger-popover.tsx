@@ -124,6 +124,34 @@ type ItemsProps = {
   loadingLabel: string;
 };
 
+type GroupedItem = {
+  item: Unstable_TriggerItem;
+  index: number;
+};
+
+type ItemGroup = {
+  id: "command" | "skill";
+  label: string;
+  items: GroupedItem[];
+};
+
+function groupItems(items: readonly Unstable_TriggerItem[]): ItemGroup[] {
+  const entries = items.map((item, index) => ({ item, index }));
+  const groups: ItemGroup[] = [
+    {
+      id: "command",
+      label: "命令",
+      items: entries.filter(({ item }) => !item.id.startsWith("skill:")),
+    },
+    {
+      id: "skill",
+      label: "技能",
+      items: entries.filter(({ item }) => item.id.startsWith("skill:")),
+    },
+  ];
+  return groups.filter((group) => group.items.length > 0);
+}
+
 const Items: FC<ItemsProps> = ({
   iconMap,
   fallbackIcon,
@@ -147,43 +175,53 @@ const Items: FC<ItemsProps> = ({
     return () => observer.disconnect();
   }, []);
   return (
-    <ComposerPrimitive.Unstable_TriggerPopoverItems className="min-h-0 flex-1 overflow-hidden">
+    <ComposerPrimitive.Unstable_TriggerPopoverItems className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {(items) => (
         <div
           data-slot="composer-trigger-popover-items"
-          className="flex max-h-[min(70vh,32rem)] min-h-0 flex-col overflow-hidden"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
         >
-          <ComposerPrimitive.Unstable_TriggerPopoverBack className="text-muted-foreground hover:bg-accent flex cursor-pointer items-center gap-1.5 border-b px-3 py-2 text-xs tracking-wide uppercase transition-colors">
+          <ComposerPrimitive.Unstable_TriggerPopoverBack className="text-muted-foreground hover:bg-accent flex shrink-0 cursor-pointer items-center gap-1.5 border-b px-3 py-2 text-xs tracking-wide uppercase transition-colors">
             <ChevronLeftIcon className="size-3.5" />
             {backLabel}
           </ComposerPrimitive.Unstable_TriggerPopoverBack>
 
-          <div ref={listRef} className="min-h-0 max-h-full overflow-y-auto overscroll-contain py-1">
-            {items.map((item, index) => {
-              const iconKey =
-                typeof item.metadata?.icon === "string"
-                  ? item.metadata.icon
-                  : undefined;
-              const Icon = resolveIcon(iconKey, iconMap, fallbackIcon);
-              return (
-                <ComposerPrimitive.Unstable_TriggerPopoverItem
-                  key={item.id}
-                  item={item}
-                  index={index}
-                  className="hover:bg-accent focus:bg-accent data-[highlighted]:bg-accent flex w-full cursor-pointer flex-col items-start gap-0.5 px-3 py-2 text-start transition-colors outline-none"
+          <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1">
+            {groupItems(items).map((group) => (
+              <div key={group.id} data-source={group.id}>
+                <div
+                  role="presentation"
+                  className="text-muted-foreground px-3 py-2 text-xs leading-4"
                 >
-                  <span className="flex items-center gap-2 text-sm font-medium">
-                    <Icon className="text-primary size-3.5" />
-                    {item.label}
-                  </span>
-                  {item.description && (
-                    <span className="text-muted-foreground ms-5.5 text-xs leading-tight">
-                      {item.description}
-                    </span>
-                  )}
-                </ComposerPrimitive.Unstable_TriggerPopoverItem>
-              );
-            })}
+                  {group.label}
+                </div>
+                {group.items.map(({ item, index }) => {
+                  const iconKey =
+                    typeof item.metadata?.icon === "string"
+                      ? item.metadata.icon
+                      : undefined;
+                  const Icon = resolveIcon(iconKey, iconMap, fallbackIcon);
+                  return (
+                    <ComposerPrimitive.Unstable_TriggerPopoverItem
+                      key={item.id}
+                      item={item}
+                      index={index}
+                      className="hover:bg-accent focus:bg-accent data-[highlighted]:bg-accent flex w-full cursor-pointer flex-col items-start gap-0.5 px-3 py-2 text-start transition-colors outline-none"
+                    >
+                      <span className="flex items-center gap-2 text-sm font-medium">
+                        <Icon className="text-primary size-3.5" />
+                        {item.label}
+                      </span>
+                      {item.description && (
+                        <span className="text-muted-foreground ms-5.5 text-xs leading-tight">
+                          {item.description}
+                        </span>
+                      )}
+                    </ComposerPrimitive.Unstable_TriggerPopoverItem>
+                  );
+                })}
+              </div>
+            ))}
             {items.length === 0 && (
               <div className="text-muted-foreground px-3 py-2 text-sm">
                 {isLoading ? loadingLabel : emptyLabel}
@@ -232,7 +270,7 @@ const ComposerTriggerPopoverImpl = forwardRef<
       ref={ref}
       data-slot="composer-trigger-popover"
       className={cn(
-        "aui-composer-trigger-popover bg-popover text-popover-foreground absolute start-0 bottom-full z-50 mb-2 flex max-h-[min(70vh,32rem)] w-64 flex-col overflow-hidden rounded-xl border shadow-lg",
+        "aui-composer-trigger-popover bg-popover text-popover-foreground absolute start-0 bottom-full z-50 mb-2 flex max-h-[min(40vh,32rem)] flex-col overflow-hidden rounded-xl border shadow-lg",
         className,
       )}
       {...props}

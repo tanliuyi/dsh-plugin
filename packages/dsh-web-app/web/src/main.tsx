@@ -1,6 +1,7 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
-import Root from './App'
+import { RouterProvider } from '@tanstack/react-router'
+import { router } from './router'
 import './globals.css'
 import "./styles/markdown.css"
 
@@ -12,6 +13,6 @@ document.documentElement.classList.toggle('dark', prefersDark)
 
 createRoot(el).render(
   <React.StrictMode>
-    <Root />
+    <RouterProvider router={router} />
   </React.StrictMode>,
 )

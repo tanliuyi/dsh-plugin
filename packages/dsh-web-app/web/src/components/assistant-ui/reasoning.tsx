@@ -330,7 +330,9 @@ function ReasoningText({
   );
 }
 
-const ReasoningImpl: ReasoningMessagePartComponent = () => <MarkdownText />;
+const ReasoningImpl: ReasoningMessagePartComponent = () => (
+  <MarkdownText hideLoadingIndicator />
+);
 
 const ReasoningGroupImpl: ReasoningGroupComponent = ({
   children,

@@ -12,6 +12,7 @@ import {
   CollapsibleContent,
 } from "@/components/ui/collapsible";
 import {
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -21,6 +22,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import { cn } from "@/lib/utils";
+import { ReasoningFade } from "@/components/assistant-ui/reasoning";
 
 const ANIMATION_DURATION = 200;
 
@@ -152,6 +154,57 @@ function ChainOfThoughtInner({ indices, children }: ChainOfThoughtProps) {
 
   const visuallyOpen = engagedRef.current ? !collapsed : running || autoOpen;
 
+  // 整个 children（reasoning + tool-call）是一个统一的滚动容器：内容超出
+  // max-h-64 后纵向滚动；仅当 chain-of-thought 正处于流式运行且展开可见时自动
+  // 追底（进预览即追底、内容增长持续追底、用户向上滚动暂停、回到底部恢复）。
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const isPreview = running && visuallyOpen;
+
+  useEffect(() => {
+    if (!isPreview) return;
+    const scrollEl = scrollRef.current;
+    const contentEl = contentRef.current;
+    if (!scrollEl || !contentEl) return;
+
+    let pinned = true;
+    let lastScrollTop = scrollEl.scrollTop;
+    let lastScrollHeight = scrollEl.scrollHeight;
+    const isAtBottom = () =>
+      Math.abs(
+        scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight,
+      ) <= 1 || scrollEl.scrollHeight <= scrollEl.clientHeight;
+
+    const pin = () => {
+      if (!pinned) return;
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    };
+    // A pin's own scroll event can arrive after new content grew the scroll
+    // height and read as "not at bottom"; only an upward move at unchanged
+    // scroll height is user intent.
+    const onScroll = () => {
+      if (isAtBottom()) {
+        pinned = true;
+      } else if (
+        scrollEl.scrollTop < lastScrollTop &&
+        scrollEl.scrollHeight === lastScrollHeight
+      ) {
+        pinned = false;
+      }
+      lastScrollTop = scrollEl.scrollTop;
+      lastScrollHeight = scrollEl.scrollHeight;
+    };
+
+    pin();
+    scrollEl.addEventListener("scroll", onScroll);
+    const observer = new ResizeObserver(pin);
+    observer.observe(contentEl);
+    return () => {
+      scrollEl.removeEventListener("scroll", onScroll);
+      observer.disconnect();
+    };
+  }, [isPreview]);
+
   return (
     <ChainOfThoughtPrimitive.Root
       data-slot="aui_chain-of-thought"
@@ -167,7 +220,7 @@ function ChainOfThoughtInner({ indices, children }: ChainOfThoughtProps) {
         data-slot="aui_chain-of-thought-trigger"
         onClick={handleTriggerClick}
         className={cn(
-          "aui-chain-of-thought-trigger group/trigger hover:bg-muted/50 flex w-full cursor-pointer items-center gap-1.5 px-2 py-1.5 text-start text-sm font-medium transition-[background-color,color,scale] active:scale-[0.98]",
+          "aui-chain-of-thought-trigger group/trigger flex w-fit-content cursor-pointer items-center gap-1.5 py-1.5 text-start text-sm font-medium transition-[background-color,color,scale] active:scale-[0.98]",
         )}
         aria-busy={running}
       >
@@ -210,14 +263,25 @@ function ChainOfThoughtInner({ indices, children }: ChainOfThoughtProps) {
             "data-closed:duration-(--animation-duration)",
           )}
         >
+          <ReasoningFade side="top" />
           <div
+            ref={scrollRef}
+            data-slot="aui_chain-of-thought-scroll"
             className={cn(
-              "border-border/50 flex flex-col gap-1 border-t px-2 pt-1.5 pb-2",
-              "[&>*]:animate-in [&>*]:fade-in-0 [&>*]:slide-in-from-top-1 [&>*]:duration-(--animation-duration) [&>*]:ease-[cubic-bezier(0.32,0.72,0,1)] [&>*]:motion-reduce:animate-none",
+              "border-border/50 relative z-0 max-h-64 overflow-y-auto border-t px-2 pt-1.5 pb-2",
             )}
           >
-            {children}
+            <div
+              ref={contentRef}
+              className={cn(
+                "flex flex-col gap-1",
+                "[&>*]:animate-in [&>*]:fade-in-0 [&>*]:slide-in-from-top-1 [&>*]:duration-(--animation-duration) [&>*]:ease-[cubic-bezier(0.32,0.72,0,1)] [&>*]:motion-reduce:animate-none",
+              )}
+            >
+              {children}
+            </div>
           </div>
+          {isPreview ? <ReasoningFade /> : null}
         </CollapsibleContent>
       </Collapsible>
     </ChainOfThoughtPrimitive.Root>

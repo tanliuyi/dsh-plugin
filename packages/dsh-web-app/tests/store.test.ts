@@ -196,3 +196,16 @@ test('boot: a stale stored id with no blank session creates and opens a new sess
   assert.equal(sessionCreateCount, 1)
   assert.deepEqual(sessionHistoryCalls, ['new-1'])
 })
+
+test('boot: a valid thread URL takes precedence over the persisted session id', async (t) => {
+  installFetch(t)
+  sessionItems = [session('restored-1'), session('url-1')]
+  workspaceItems = [{ workspaceId: 'ws-1', path: '/workspace', sessionIds: ['restored-1', 'url-1'] }]
+  resetStore('restored-1')
+
+  await useDsh.getState().boot('url-1')
+
+  assert.equal(useDsh.getState().currentSessionId, 'url-1')
+  assert.equal(sessionCreateCount, 0)
+  assert.deepEqual(sessionHistoryCalls, ['url-1'])
+})

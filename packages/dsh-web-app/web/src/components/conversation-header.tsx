@@ -3,6 +3,7 @@ import { ChevronDownIcon, ChevronRightIcon, FolderIcon, LoaderCircleIcon } from 
 import { useDsh } from '../dsh/store'
 import type { JobView } from '../dsh/api'
 import { cn } from '../lib/utils'
+import { useThreadNavigation } from '../router-navigation'
 import { TooltipIconButton } from './assistant-ui/tooltip-icon-button'
 
 function workspaceLabel(path?: string): string {
@@ -220,7 +221,7 @@ function JobStatusBar() {
 export function ConversationHeader() {
   const currentSessionId = useDsh((state) => state.currentSessionId)
   const sessions = useDsh((state) => state.sessions)
-  const openSession = useDsh((state) => state.openSession)
+  const navigateToThread = useThreadNavigation()
   const current = sessions.find((session) => session.sessionId === currentSessionId)
 
   if (!current || current.blank) return null
@@ -258,7 +259,7 @@ export function ConversationHeader() {
                   type="button"
                   disabled={last}
                   aria-current={last ? 'page' : undefined}
-                  onClick={() => { if (!last) void openSession(session.sessionId) }}
+                  onClick={() => { if (!last) void navigateToThread(session.sessionId) }}
                   className={last
                     ? 'text-foreground max-w-56 truncate px-1 text-sm font-medium'
                     : 'text-muted-foreground hover:bg-muted max-w-44 truncate rounded-md px-1.5 py-1 text-sm transition-colors'}

@@ -20,6 +20,7 @@ let sessionCreateCount = 0
 let sessionHistoryCalls: string[] = []
 let sessionItems: Array<Record<string, unknown>> = []
 let workspaceItems: Array<Record<string, unknown>> = []
+let historyResponse: (payload: Record<string, unknown>) => unknown = () => ({ events: [], hasMore: false })
 
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } })
@@ -30,6 +31,7 @@ function installFetch(t: test.Context): void {
   calls.length = 0
   sessionCreateCount = 0
   sessionHistoryCalls = []
+  historyResponse = () => ({ events: [], hasMore: false })
 
   globalThis.fetch = async (_input, init) => {
     const request = JSON.parse(String(init?.body)) as { rpcId: string; method: string; payload: unknown }

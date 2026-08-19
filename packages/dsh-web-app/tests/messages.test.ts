@@ -98,6 +98,78 @@ test('command/done can reconstruct a windowed lifecycle without command/run', ()
   }])
 })
 
+test('automatic compaction renders one checkpoint marker with correlated summary stats', () => {
+  const messages = foldHistory([
+    event(1, 'user/message', {
+      id: 'u1', source: { kind: 'user' }, content: [{ type: 'text', text: 'old history' }],
+    }),
+    event(2, 'compaction/summary', {
+      compactionId: 'compact-auto',
+      summary: [{ type: 'text', text: '## Resume\n\nKeep this context.' }],
+      shadowedSeqs: [1],
+      shadowedTokenCount: 42,
+    }),
+    {
+      ...event(3, 'user/message', {
+        source: { kind: 'plugin', plugin: 'compact', compactionId: 'compact-auto' },
+        content: [{ type: 'text', text: '<context_checkpoint>hidden</context_checkpoint>' }],
+      }),
+      surfaceOp: { op: 'replace', start: 1, end: 1 },
+    },
+  ])
+
+  assert.equal(messages.length, 2)
+  assert.deepEqual(messages[1]?.parts, [{
+    type: 'compaction',
+    compactionId: 'compact-auto',
+    summary: '## Resume\n\nKeep this context.',
+    shadowedItemCount: 1,
+    shadowedTokenCount: 42,
+  }])
+  assert.equal(messages[1]?.seq, 3)
+})
+
+test('manual compact merges checkpoint evidence into its command node', () => {
+  const messages = foldHistory([
+    event(10, 'command/run', { commandId: 'cmd-compact', name: 'compact', args: '' }),
+    event(11, 'compaction/summary', {
+      compactionId: 'compact-manual',
+      sourceCommandId: 'cmd-compact',
+      summary: [{ type: 'text', text: 'Retained facts.' }],
+      shadowedSeqs: [1, 2, 4],
+      shadowedTokenCount: 108331,
+    }),
+    {
+      ...event(12, 'user/message', {
+        source: {
+          kind: 'plugin', plugin: 'compact', compactionId: 'compact-manual', sourceCommandId: 'cmd-compact',
+        },
+        content: [{ type: 'text', text: 'hidden checkpoint' }],
+      }),
+      surfaceOp: { op: 'replace', start: 1, end: 4 },
+    },
+    event(13, 'command/done', {
+      commandId: 'cmd-compact', kind: 'success', text: 'Compacted 3 history items (~108331 tokens).',
+    }),
+  ])
+
+  assert.equal(messages.length, 1)
+  assert.deepEqual(messages[0]?.parts, [{
+    type: 'command',
+    commandId: 'cmd-compact',
+    name: 'compact',
+    args: '',
+    outcome: { kind: 'success', text: 'Compacted 3 history items (~108331 tokens).' },
+    compaction: {
+      type: 'compaction',
+      compactionId: 'compact-manual',
+      summary: 'Retained facts.',
+      shadowedItemCount: 3,
+      shadowedTokenCount: 108331,
+    },
+  }])
+})
+
 test('foldHistory sorts by seq and drops duplicate replay events', () => {
   const messages = foldHistory([
     event(2, 'command/done', { commandId: 'x', kind: 'success', text: 'done' }),

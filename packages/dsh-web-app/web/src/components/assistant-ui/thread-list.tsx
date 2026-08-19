@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { useThreadNavigation } from "@/router-navigation";
+import { threadIdFromPathname, useThreadNavigation } from "@/router-navigation";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -29,6 +29,7 @@ import {
 } from "@assistant-ui/react";
 import {
   ArchiveIcon,
+  BotIcon,
   CircleAlertIcon,
   ChevronDownIcon,
   ChevronRightIcon,
@@ -43,13 +44,16 @@ import {
   TrashIcon,
 } from "lucide-react";
 import {
+  createContext,
   forwardRef,
+  useContext,
   useEffect,
   useMemo,
   useRef,
   useState,
   type ComponentPropsWithoutRef,
   type FC,
+  type ReactNode,
 } from "react";
 
 export const ThreadList: FC = () => {
@@ -220,6 +224,19 @@ export const ThreadListItems: FC<
 const INITIAL_THREAD_COUNT = 5;
 const THREAD_COUNT_INCREMENT = 10;
 
+type ThreadTreeItemContextValue = {
+  depth: number;
+  hasChildren: boolean;
+  expanded: boolean;
+  toggleExpanded?: () => void;
+};
+
+const ThreadTreeItemContext = createContext<ThreadTreeItemContextValue>({
+  depth: 0,
+  hasChildren: false,
+  expanded: false,
+});
+
 const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   searchQuery = "",
 }) => {
@@ -230,6 +247,7 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   const currentSessionId = useDsh((s) => s.currentSessionId);
   const setGroupExpanded = useDsh((s) => s.setThreadListGroupExpanded);
   const setNewSessionWorkspace = useDsh((s) => s.setNewSessionWorkspace);
+  const loadSubagents = useDsh((s) => s.loadSubagents);
   const threadIds = useAuiState((s) => s.threads.threadIds);
   const query = searchQuery.trim().toLowerCase();
   const navigateToThread = useThreadNavigation();
@@ -240,6 +258,9 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   const [visibleThreadCounts, setVisibleThreadCounts] = useState<
     Record<string, number>
   >({});
+  const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const expandThreads = (groupKey: string) => {
     setVisibleThreadCounts((current) => ({
@@ -318,30 +339,116 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   }, [projection.sessions, query, labelById]);
 
   useEffect(() => {
-    if (view.groupBy !== "workspace" || currentSessionId === null) return;
+    const routeSessionId = typeof window === "undefined"
+      ? null
+      : threadIdFromPathname(window.location.pathname);
+    const activeSessionId = routeSessionId ?? currentSessionId;
+    if (view.groupBy !== "workspace" || activeSessionId === null) return;
+    const parentByChild = new Map<string, string>();
+    for (const [parentId, childIds] of Object.entries(projection.childrenByParent)) {
+      for (const childId of childIds) parentByChild.set(childId, parentId);
+    }
+    let rootId = activeSessionId;
+    const seen = new Set<string>();
+    while (parentByChild.has(rootId) && !seen.has(rootId)) {
+      seen.add(rootId);
+      rootId = parentByChild.get(rootId)!;
+    }
     const group = projection.groups.find((item) =>
-      item.sessionIds.includes(currentSessionId),
+      item.sessionIds.includes(rootId),
     );
     if (group && !view.expandedGroups.includes(group.key)) {
       setGroupExpanded(group.key, true);
     }
   }, [
     currentSessionId,
+    projection.childrenByParent,
     projection.groups,
     setGroupExpanded,
     view.expandedGroups,
     view.groupBy,
   ]);
 
-  const renderItem = (id: string) => {
+  useEffect(() => {
+    const routeSessionId = typeof window === "undefined"
+      ? null
+      : threadIdFromPathname(window.location.pathname);
+    const activeSessionId = routeSessionId ?? currentSessionId;
+    if (activeSessionId === null) return;
+    const byId = new Map(sessions.map((session) => [session.sessionId, session]));
+    const ancestors: string[] = [];
+    const seen = new Set<string>();
+    let current = byId.get(activeSessionId);
+    while (
+      current?.origin === "subagent" &&
+      current.parentSessionId &&
+      !seen.has(current.sessionId)
+    ) {
+      seen.add(current.sessionId);
+      ancestors.push(current.parentSessionId);
+      current = byId.get(current.parentSessionId);
+    }
+    if (ancestors.length === 0) return;
+    for (const parentId of ancestors) void loadSubagents(parentId).catch(() => {});
+    setExpandedSessionIds((expanded) => {
+      if (ancestors.every((id) => expanded.has(id))) return expanded;
+      return new Set([...expanded, ...ancestors]);
+    });
+  }, [currentSessionId, loadSubagents, sessions]);
+
+  const renderItem = (
+    id: string,
+    tree: Omit<ThreadTreeItemContextValue, "toggleExpanded"> & {
+      toggleExpanded?: () => void;
+    } = { depth: 0, hasChildren: false, expanded: false },
+  ) => {
     const index = indexById.get(id);
     if (index === undefined) return null;
     return (
-      <ThreadListPrimitive.ItemByIndex
-        key={id}
-        index={index}
-        components={{ ThreadListItem }}
-      />
+      <ThreadTreeItemContext.Provider key={id} value={tree}>
+        <ThreadListPrimitive.ItemByIndex
+          index={index}
+          components={{ ThreadListItem }}
+        />
+      </ThreadTreeItemContext.Provider>
+    );
+  };
+
+  const renderTreeItem = (id: string, depth = 0): ReactNode => {
+    const children = projection.childrenByParent[id] ?? [];
+    const expanded = expandedSessionIds.has(id);
+    const item = renderItem(id, {
+      depth,
+      hasChildren: children.length > 0,
+      expanded,
+      toggleExpanded: children.length > 0
+        ? () => setExpandedSessionIds((current) => {
+            const next = new Set(current);
+            if (next.has(id)) next.delete(id);
+            else {
+              next.add(id);
+              void loadSubagents(id).catch(() => {});
+            }
+            return next;
+          })
+        : undefined,
+    });
+    return (
+      <div key={id} data-slot="aui_thread-tree-node">
+        {item}
+        {children.length > 0 && expanded ? (
+          <div role="group" data-slot="aui_thread-tree-children" className="ms-4">
+            {children.map((childId) => (
+              <div
+                key={childId}
+                className="relative ps-5 before:absolute before:start-0 before:top-0 before:h-full before:border-s before:border-border/80 after:absolute after:start-0 after:top-4 after:w-4 after:border-t after:border-border/80 last:before:h-4"
+              >
+                {renderTreeItem(childId, depth + 1)}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
     );
   };
 
@@ -376,13 +483,14 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
             </span>
           </button>
         ))}
-        {filteredIds.map(renderItem)}
+        {filteredIds.map((id) => renderItem(id))}
       </div>
     );
   }
 
   if (view.groupBy === "flat") {
-    return <>{filteredIds.map(renderItem)}</>;
+    const childIds = new Set(Object.values(projection.childrenByParent).flat());
+    return <>{filteredIds.filter((id) => !childIds.has(id)).map((id) => renderTreeItem(id))}</>;
   }
 
   return (
@@ -448,7 +556,7 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
             {group.expanded &&
               (group.sessionIds.length > 0 ? (
                 <>
-                  {visibleSessionIds.map(renderItem)}
+                  {visibleSessionIds.map((id) => renderTreeItem(id))}
                   {(hasMoreThreads || hasExpandedThreads) && (
                     <div className="flex items-center gap-3 ps-6 pe-2.5 py-1">
                       {hasMoreThreads && (
@@ -659,6 +767,29 @@ const ThreadListSkeleton: FC = () => {
   );
 };
 
+const SUBAGENT_ROLE_LABELS: Record<string, string> = {
+  delegate: "委派",
+  worker: "执行者",
+  reviewer: "审查员",
+  scout: "侦察员",
+  researcher: "研究员",
+  oracle: "顾问",
+};
+
+function subagentRoleLabel(label?: string): string {
+  const role = label?.split("·", 1)[0]?.trim().toLowerCase();
+  return role ? (SUBAGENT_ROLE_LABELS[role] ?? "子代理") : "子代理";
+}
+
+function subagentTaskTitle(label: string | undefined, fallback: string): string {
+  if (!label?.trim()) return fallback;
+  const [role, ...task] = label.split("·");
+  if (task.length > 0 && SUBAGENT_ROLE_LABELS[role.trim().toLowerCase()]) {
+    return task.join("·").trim() || fallback;
+  }
+  return label.trim();
+}
+
 export const ThreadListItem: FC = () => {
   const isPendingRequest = useAuiState(
     (s) => s.threadListItem.custom?.hasPendingRequest === true,
@@ -668,6 +799,11 @@ export const ThreadListItem: FC = () => {
   );
   const threadId = useAuiState((s) => s.threadListItem.id);
   const currentSessionId = useDsh((s) => s.currentSessionId);
+  const session = useDsh((s) =>
+    s.sessions.find((item) => item.sessionId === threadId),
+  );
+  const tree = useContext(ThreadTreeItemContext);
+  const isSubagent = session?.origin === "subagent" && tree.depth > 0;
   const isActive = currentSessionId === threadId;
   const [isRenaming, setIsRenaming] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -684,8 +820,30 @@ export const ThreadListItem: FC = () => {
       data-slot="aui_thread-list-item"
       data-active={isActive ? "true" : undefined}
       aria-current={isActive ? "true" : undefined}
-      className="group ps-4 hover:bg-muted focus-visible:bg-muted data-active:bg-muted has-focus-visible:bg-muted has-data-[state=open]:bg-muted relative flex h-8 items-center rounded-md transition-colors focus-visible:outline-none"
+      className={cn(
+        "group hover:bg-muted focus-visible:bg-muted data-active:bg-muted has-focus-visible:bg-muted has-data-[state=open]:bg-muted relative flex h-8 min-w-0 items-center rounded-md transition-colors focus-visible:outline-none",
+        !tree.hasChildren && !isSubagent && "ps-4",
+      )}
     >
+      {tree.hasChildren ? (
+        <button
+          type="button"
+          data-slot="aui_thread-tree-toggle"
+          aria-label={(tree.expanded ? "Collapse " : "Expand ") + (session?.title ?? "thread") + " subagents"}
+          aria-expanded={tree.expanded}
+          className="absolute start-2 top-1/2 z-10 flex size-4 -translate-y-1/2 items-center justify-center rounded-full bg-background text-muted-foreground shadow-xs ring-1 ring-border/60 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          onClick={(event) => {
+            event.stopPropagation();
+            tree.toggleExpanded?.();
+          }}
+        >
+          {tree.expanded ? (
+            <ChevronDownIcon className="size-3" />
+          ) : (
+            <ChevronRightIcon className="size-3" />
+          )}
+        </button>
+      ) : null}
       {isRenaming ? (
         <ThreadListItemRename
           onDone={(restoreFocus) => {
@@ -697,28 +855,54 @@ export const ThreadListItem: FC = () => {
         <ThreadListItemPrimitive.Trigger
           ref={triggerRef}
           data-slot="aui_thread-list-item-trigger"
-          className="focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center rounded-md px-3 text-start text-sm outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9 focus-visible:ring-[3px]"
+          className={cn(
+            "focus-visible:ring-ring/50 flex h-full min-w-0 flex-1 items-center gap-2 rounded-md text-start text-sm outline-none focus-visible:ring-[3px]",
+            isSubagent ? "px-2" : tree.hasChildren ? "ps-7 pe-3" : "px-3",
+          )}
+          title={session?.title}
         >
-          {isPendingRequest && (
-            <CircleAlertIcon
-              aria-hidden
-              data-slot="aui_thread-list-item-pending-request"
-              className="text-warning absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2"
-            />
-          )}
-          {!isPendingRequest && isRunning && (
-            <Loader2Icon
-              aria-hidden
-              data-slot="aui_thread-list-item-running"
-              className="text-muted-foreground absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2 animate-spin"
-            />
-          )}
+          {isSubagent ? (
+            <>
+              <BotIcon
+                aria-hidden
+                data-slot="aui_thread-list-item-subagent-icon"
+                className="size-4 shrink-0 text-muted-foreground"
+              />
+              <span
+                data-slot="aui_thread-list-item-subagent-role"
+                className="shrink-0 rounded-md bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground"
+              >
+                {subagentRoleLabel(session?.subagentLabel)}
+              </span>
+            </>
+          ) : null}
           <span
             data-slot="aui_thread-list-item-title"
             className="min-w-0 flex-1 truncate"
           >
-            <ThreadListItemPrimitive.Title fallback="New Chat" />
+            {isSubagent
+              ? subagentTaskTitle(session?.subagentLabel, session?.title ?? "Subagent")
+              : <ThreadListItemPrimitive.Title fallback="New Chat" />}
           </span>
+          {isPendingRequest ? (
+            <CircleAlertIcon
+              aria-hidden
+              data-slot="aui_thread-list-item-pending-request"
+              className={cn(
+                "size-3.5 shrink-0 text-warning",
+                !isSubagent && "group-hover:hidden group-has-focus-visible:hidden group-has-data-[state=open]:hidden",
+              )}
+            />
+          ) : isRunning ? (
+            <Loader2Icon
+              aria-hidden
+              data-slot="aui_thread-list-item-running"
+              className={cn(
+                "size-3.5 shrink-0 animate-spin text-muted-foreground",
+                !isSubagent && "group-hover:hidden group-has-focus-visible:hidden group-has-data-[state=open]:hidden",
+              )}
+            />
+          ) : null}
           {isPendingRequest ? (
             <span className="sr-only">Request needs attention</span>
           ) : isRunning ? (
@@ -726,10 +910,12 @@ export const ThreadListItem: FC = () => {
           ) : null}
         </ThreadListItemPrimitive.Trigger>
       )}
-      <ThreadListItemMore
-        onRename={() => setIsRenaming(true)}
-        isActive={isActive}
-      />
+      {!isSubagent ? (
+        <ThreadListItemMore
+          onRename={() => setIsRenaming(true)}
+          isActive={isActive}
+        />
+      ) : null}
     </ThreadListItemPrimitive.Root>
   );
 };
@@ -809,7 +995,7 @@ const ThreadListItemMore: FC<{ onRename: () => void; isActive: boolean }> = ({
           tooltip="More options"
           data-slot="aui_thread-list-item-more"
           className={cn(
-            "data-[state=open]:bg-accent absolute end-1.5 top-1/2 size-6 -translate-y-1/2 p-0 opacity-0 group-hover:opacity-100 group-has-focus-visible:opacity-100 data-[state=open]:opacity-100",
+            "data-[state=open]:bg-accent hidden size-6 shrink-0 p-0 transition-none group-hover:flex group-has-focus-visible:flex data-[state=open]:flex",
           )}
         >
           <MoreHorizontalIcon className="size-3.5" />

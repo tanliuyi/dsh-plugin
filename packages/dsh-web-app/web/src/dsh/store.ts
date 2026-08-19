@@ -31,6 +31,7 @@ export interface SessionView {
   parentSessionId?: string;
   origin?: 'subagent';
   subagentMode?: 'one-shot' | 'continuable';
+  subagentLabel?: string;
 }
 
 export interface ContextUsage {
@@ -174,6 +175,34 @@ const commandEpochs = new KeyedEpochGuard()
 const skillEpochs = new KeyedEpochGuard()
 const liveEventsDuringOpen = new Map<string, FoldableSessionEvent[]>()
 const historyEventsBySession = new Map<string, FoldableSessionEvent[]>()
+
+type PendingLiveRender = {
+  sessionId: string
+  messages: DshMessage[]
+  isRunning?: boolean
+}
+
+let pendingLiveRender: PendingLiveRender | null = null
+let liveRenderScheduled = false
+
+function scheduleLiveRender(
+  next: PendingLiveRender,
+  publish: (render: PendingLiveRender) => void,
+): void {
+  pendingLiveRender = pendingLiveRender?.sessionId === next.sessionId
+    ? { ...next, isRunning: next.isRunning ?? pendingLiveRender.isRunning }
+    : next
+  if (liveRenderScheduled) return
+  liveRenderScheduled = true
+  const flush = () => {
+    liveRenderScheduled = false
+    const render = pendingLiveRender
+    pendingLiveRender = null
+    if (render) publish(render)
+  }
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush)
+  else queueMicrotask(flush)
+}
 
 function mergeSessionEvents(...pages: readonly FoldableSessionEvent[][]): FoldableSessionEvent[] {
   const bySeq = new Map<number, FoldableSessionEvent>()
@@ -423,6 +452,16 @@ export const useDsh = create<DshState>((set, get) => ({
         todos: todoProjectionOf(s.projections?.values?.todos),
         parentSessionId: s.parentSessionId,
         origin: s.origin,
+        subagentMode: (() => {
+          const projection = s.projections?.values?.subagent as { mode?: unknown } | undefined
+          return projection?.mode === 'one-shot' || projection?.mode === 'continuable'
+            ? projection.mode
+            : undefined
+        })(),
+        subagentLabel: (() => {
+          const projection = s.projections?.values?.subagent as { label?: unknown } | undefined
+          return typeof projection?.label === 'string' ? projection.label : undefined
+        })(),
       })),
       workspaces,
       archivedSessionIds,
@@ -473,11 +512,15 @@ export const useDsh = create<DshState>((set, get) => ({
     conversationFolds.set(sessionId, folder)
     saveCurrentSessionId(sessionId)
     const session = get().sessions.find((item) => item.sessionId === sessionId)
-    set({ currentSessionId: sessionId, permissions: session?.permissions ?? null, contextUsage: session?.contextUsage, goal: session?.goal ?? null, todos: session?.todos, messages: [], loadingHistory: true, loadingMoreHistory: false, historyHasMore: false, historyLoadError: null, error: null, isRunning: session?.running ?? false, planMode: false, modelCatalogGroups: [], modelCatalog: [], selectedProvider: null, selectedModel: null, selectedReasoningEffort: undefined, modelRoutable: null, modelCatalogSessionId: null, commands: [], commandsSessionId: null, commandsLoading: session?.origin !== 'subagent', commandLoadError: null, skills: [], skillsSessionId: null, skillsLoading: true })
-    if (session?.origin !== 'subagent') void get().loadCommands(sessionId).catch(() => {})
-    void get().loadSkills(sessionId)
-    void get().loadSessionModels(sessionId)
-    if (session?.origin === 'subagent' && session.parentSessionId) void get().loadSubagents(session.parentSessionId)
+    const isSubagent = session?.origin === 'subagent'
+    set({ currentSessionId: sessionId, permissions: session?.permissions ?? null, contextUsage: session?.contextUsage, goal: session?.goal ?? null, todos: session?.todos, messages: [], loadingHistory: true, loadingMoreHistory: false, historyHasMore: false, historyLoadError: null, error: null, isRunning: session?.running ?? false, planMode: false, modelCatalogGroups: [], modelCatalog: [], modelCatalogLoading: !isSubagent, selectedProvider: null, selectedModel: null, selectedReasoningEffort: undefined, modelRoutable: null, modelCatalogSessionId: null, commands: [], commandsSessionId: null, commandsLoading: !isSubagent, commandLoadError: null, skills: [], skillsSessionId: null, skillsLoading: !isSubagent })
+    if (!isSubagent) {
+      void get().loadCommands(sessionId).catch(() => {})
+      void get().loadSkills(sessionId)
+      void get().loadSessionModels(sessionId)
+    } else if (session.parentSessionId) {
+      void get().loadSubagents(session.parentSessionId)
+    }
     try {
       let result: Awaited<ReturnType<typeof rpc<{ events: { event: FoldableSessionEvent }[]; projections?: ProjectionBaseline; hasMore?: boolean }>>>
       if (session?.origin === 'subagent' && session.parentSessionId) {
@@ -487,6 +530,13 @@ export const useDsh = create<DshState>((set, get) => ({
           ? catalogResult.value.entries.find((item) => item.kind === 'child' && item.id === sessionId)
           : undefined
         const mode = entry?.kind === 'child' ? entry.mode : session.subagentMode ?? 'one-shot'
+        if (entry?.kind === 'child') {
+          set((state) => ({
+            sessions: state.sessions.map((item) => item.sessionId === sessionId
+              ? { ...item, subagentMode: entry.mode, subagentLabel: entry.label ?? item.subagentLabel }
+              : item),
+          }))
+        }
         result = await rpc<{ events: { event: FoldableSessionEvent }[]; projections?: ProjectionBaseline; hasMore?: boolean }>('subagent.history', {
           parentSessionId: session.parentSessionId,
           childSessionId: sessionId,
@@ -915,7 +965,19 @@ export const useDsh = create<DshState>((set, get) => ({
   async loadSubagents(parentSessionId) {
     const result = await rpc<SubagentCatalog>('subagent.list', { parentSessionId })
     if (!result.ok) throw new Error(result.error.message)
-    set((state) => ({ subagentsByParent: { ...state.subagentsByParent, [parentSessionId]: result.value } }))
+    const entriesById = new Map(result.value.entries.flatMap((entry) =>
+      entry.kind === 'child' ? [[entry.id, entry] as const] : [],
+    ))
+    set((state) => ({
+      subagentsByParent: { ...state.subagentsByParent, [parentSessionId]: result.value },
+      sessions: state.sessions.map((session) => {
+        if (session.parentSessionId !== parentSessionId) return session
+        const entry = entriesById.get(session.sessionId)
+        return entry
+          ? { ...session, subagentMode: entry.mode, subagentLabel: entry.label ?? session.subagentLabel }
+          : session
+      }),
+    }))
   },
 
   setThreadListGroupBy(groupBy) {
@@ -1130,20 +1192,38 @@ export const useDsh = create<DshState>((set, get) => ({
     }
     const folder = conversationFolds.get(sessionId)
     if (!folder) return
-    historyEventsBySession.set(sessionId, mergeSessionEvents(historyEventsBySession.get(sessionId) ?? [], [ev]))
+    const historyEvents = historyEventsBySession.get(sessionId) ?? []
+    const historyTail = historyEvents.at(-1)
+    if (!historyTail || historyTail.seq < ev.seq) {
+      historyEvents.push(ev)
+      historyEventsBySession.set(sessionId, historyEvents)
+    } else {
+      historyEventsBySession.set(sessionId, mergeSessionEvents(historyEvents, [ev]))
+    }
     const folded = folder.fold(ev)
     if (!folded) return
-    const patch: Partial<DshState> = { messages: folded.messages }
-    if (folded.isRunning !== undefined) patch.isRunning = folded.isRunning
-    set(patch as DshState)
-    const hydrationSeq = ev.seq
-    void get().hydrateMessageImages(sessionId, folded.messages).then((messages) => {
-      if (get().currentSessionId === sessionId && get().lastEventSeqBySession[sessionId] === hydrationSeq) {
-        // 把 hydration 结果写回 fold 基线，后续增量 fold 直接在上面继续。
-        folder.applyMessages(messages)
-        set({ messages })
-      }
-    }).catch(() => {})
+    scheduleLiveRender(
+      { sessionId, messages: folded.messages, isRunning: folded.isRunning },
+      (render) => {
+        if (get().currentSessionId !== render.sessionId) return
+        const patch: Partial<DshState> = { messages: render.messages }
+        if (render.isRunning !== undefined) patch.isRunning = render.isRunning
+        set(patch as DshState)
+      },
+    )
+    const needsImageHydration = folded.messages.some((message) =>
+      message.parts.some((part) => part.type === 'image' && !part.src),
+    )
+    if (needsImageHydration) {
+      const hydrationSeq = ev.seq
+      void get().hydrateMessageImages(sessionId, folded.messages).then((messages) => {
+        if (get().currentSessionId === sessionId && get().lastEventSeqBySession[sessionId] === hydrationSeq) {
+          // 把 hydration 结果写回 fold 基线，后续增量 fold 直接在上面继续。
+          folder.applyMessages(messages)
+          set({ messages })
+        }
+      }).catch(() => {})
+    }
   },
 
   // mux session/subscribed：host 在 (重)连后报出该 session 的 durable baseline seq。

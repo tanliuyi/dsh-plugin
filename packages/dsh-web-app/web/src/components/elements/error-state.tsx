@@ -34,7 +34,7 @@ export function ErrorState({
         {...props}
       >
         <RefreshCwIcon className="text-foreground/45 size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
-        <ShimmerLabel className="text-foreground/55 relative inline-block">
+        <ShimmerLabel className="text-foreground/55 relative inline-block flex-shrink-0">
           {title}
         </ShimmerLabel>
         <span className="text-foreground/40 truncate text-xs">{detail}</span>

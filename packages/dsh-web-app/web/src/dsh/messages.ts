@@ -27,11 +27,19 @@ export type DshMessagePart =
     maxRetries?: number
   }
   | {
+    type: 'compaction'
+    compactionId: string
+    summary: string | null
+    shadowedItemCount: number | null
+    shadowedTokenCount: number | null
+  }
+  | {
     type: 'command'
     commandId: string
     name: string | null
     args: string | null
     outcome: null | { kind: 'success' | 'error'; text?: string; sourceEventSeq?: number }
+    compaction?: Extract<DshMessagePart, { type: 'compaction' }>
   }
 
 export interface FoldableSessionEvent {
@@ -128,6 +136,50 @@ function imagePartsOf(data: Record<string, unknown> | undefined): DshMessagePart
   })
 }
 
+
+type CompactionPart = Extract<DshMessagePart, { type: 'compaction' }>
+
+type CompactionSummaryData = {
+  summary: string | null
+  shadowedItemCount: number | null
+  shadowedTokenCount: number | null
+}
+
+function compactionSummaryOf(data: Record<string, unknown>): CompactionSummaryData {
+  const blocks = Array.isArray(data.summary) ? data.summary : []
+  const summary = blocks
+    .map((block) => typeof block === 'object' && block !== null && (block as Record<string, unknown>).type === 'text'
+      ? String((block as Record<string, unknown>).text ?? '')
+      : '')
+    .join('')
+  const shadowedSeqs = Array.isArray(data.shadowedSeqs)
+    && data.shadowedSeqs.every((seq) => Number.isSafeInteger(seq) && Number(seq) >= 0)
+    ? data.shadowedSeqs
+    : null
+  return {
+    summary: summary.trim() === '' ? null : summary,
+    shadowedItemCount: shadowedSeqs?.length ?? null,
+    shadowedTokenCount: Number.isSafeInteger(data.shadowedTokenCount) && Number(data.shadowedTokenCount) >= 0
+      ? Number(data.shadowedTokenCount)
+      : null,
+  }
+}
+
+function compactCheckpointSource(ev: FoldableSessionEvent, data: Record<string, unknown>): {
+  compactionId: string
+  sourceCommandId?: string
+} | null {
+  if (ev.type !== 'user/message' || typeof ev.surfaceOp !== 'object' || ev.surfaceOp === null) return null
+  if ((ev.surfaceOp as Record<string, unknown>).op !== 'replace') return null
+  const source = (data.source ?? {}) as Record<string, unknown>
+  if (source.kind !== 'plugin' || source.plugin !== 'compact' || typeof source.compactionId !== 'string' || source.compactionId === '') return null
+  return {
+    compactionId: source.compactionId,
+    ...(typeof source.sourceCommandId === 'string' && source.sourceCommandId !== ''
+      ? { sourceCommandId: source.sourceCommandId }
+      : {}),
+  }
+}
 
 function collectedLabels(source: Record<string, unknown>, member: string, field: string): string[] {
   const values = source[member]
@@ -261,14 +313,67 @@ export function foldEvent(
   messages: DshMessage[],
   ev: FoldableSessionEvent,
   claimed?: ReadonlySet<string>,
+  compactionSummaries?: Map<string, CompactionSummaryData>,
 ): { messages: DshMessage[]; isRunning?: boolean } | null {
   const data = (ev.data ?? {}) as Record<string, unknown>
   const base = { seq: ev.seq, createdAt: ev.time }
 
   switch (ev.type) {
+    case 'compaction/summary': {
+      if (typeof data.compactionId !== 'string' || data.compactionId === '') return null
+      compactionSummaries?.set(data.compactionId, compactionSummaryOf(data))
+      return null
+    }
     case 'user/message': {
-      // Replacement copies are model-surface checkpoints (for example manual
-      // compaction), not new human transcript entries.
+      const checkpoint = compactCheckpointSource(ev, data)
+      if (checkpoint !== null) {
+        const summary = compactionSummaries?.get(checkpoint.compactionId)
+        const compaction: CompactionPart = {
+          type: 'compaction',
+          compactionId: checkpoint.compactionId,
+          summary: summary?.summary ?? null,
+          shadowedItemCount: summary?.shadowedItemCount ?? null,
+          shadowedTokenCount: summary?.shadowedTokenCount ?? null,
+        }
+        compactionSummaries?.delete(checkpoint.compactionId)
+        if (checkpoint.sourceCommandId !== undefined) {
+          const id = `cmd-${checkpoint.sourceCommandId}`
+          const existingIndex = messages.findIndex((message) => message.id === id)
+          if (existingIndex >= 0) {
+            const next = [...messages]
+            const existing = next[existingIndex]!
+            next[existingIndex] = {
+              ...existing,
+              parts: existing.parts.map((part) => part.type === 'command' ? { ...part, compaction } : part),
+            }
+            return { messages: next }
+          }
+          return {
+            messages: [...messages, {
+              id,
+              role: 'assistant',
+              parts: [{
+                type: 'command',
+                commandId: checkpoint.sourceCommandId,
+                name: 'compact',
+                args: null,
+                outcome: null,
+                compaction,
+              }],
+              ...base,
+            }],
+          }
+        }
+        return {
+          messages: [...messages, {
+            id: `compaction-${checkpoint.compactionId}`,
+            role: 'assistant',
+            parts: [compaction],
+            ...base,
+          }],
+        }
+      }
+      // Other replacement copies are model-surface checkpoints, not new human transcript entries.
       if (ev.surfaceOp !== undefined && ev.surfaceOp !== 'append') return null
       const text = textOf(data)
       const images = imagePartsOf(data)
@@ -451,7 +556,12 @@ export function foldEvent(
       const msg: DshMessage = {
         id,
         role: 'assistant',
-        parts: [command],
+        parts: [{
+          ...command,
+          ...(previous?.type === 'command' && previous.compaction !== undefined
+            ? { compaction: previous.compaction }
+            : {}),
+        }],
         seq: existing?.seq ?? ev.seq,
         createdAt: existing?.createdAt ?? ev.time,
       }
@@ -515,6 +625,7 @@ function applyInboxSplice(previous: InboxFoldState | undefined, data: unknown): 
 export class ConversationFold {
   private messages: DshMessage[] = []
   private inbox: InboxFoldState = { pending: [], claimed: new Set() }
+  private compactionSummaries = new Map<string, CompactionSummaryData>()
   private seen = new Set<number>()
   private lastFoldedSeq = -1
 
@@ -547,7 +658,7 @@ export class ConversationFold {
       this.inbox = applyInboxSplice(this.inbox, ev.data)
       return null
     }
-    const folded = foldEvent(this.messages, ev, this.inbox.claimed)
+    const folded = foldEvent(this.messages, ev, this.inbox.claimed, this.compactionSummaries)
     if (!folded) return null
     this.messages = folded.messages
     return {

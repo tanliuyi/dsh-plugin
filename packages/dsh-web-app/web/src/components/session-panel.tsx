@@ -84,12 +84,17 @@ export function useSessionPanel(): SessionPanelContextValue {
 }
 
 export function SessionPanelProvider({ children }: PropsWithChildren) {
-  const [open, setOpenState] = useState(readInitialOpen)
+  const [preferredOpen, setPreferredOpen] = useState(readInitialOpen)
+  const available = useDsh((state) => {
+    const session = state.sessions.find((item) => item.sessionId === state.currentSessionId)
+    return session !== undefined && !session.blank
+  })
+  const open = preferredOpen && available
 
   const value = useMemo<SessionPanelContextValue>(() => ({
     open,
     setOpen: (next) => {
-      setOpenState(next)
+      setPreferredOpen(next)
       try {
         window.localStorage.setItem(SESSION_PANEL_STORAGE_KEY, String(next))
       } catch {
@@ -106,7 +111,7 @@ export function SessionPanelProvider({ children }: PropsWithChildren) {
         className="session-panel-layout flex min-h-0 flex-1 flex-col border-l border-border"
       >
         {children}
-        <SessionPanel />
+        {available ? <SessionPanel /> : null}
       </div>
     </SessionPanelContext.Provider>
   )

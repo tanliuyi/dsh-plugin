@@ -325,6 +325,11 @@ body.is-resizing-column {
   }
 }
 
+[data-history-restoring="true"] * {
+  animation: none !important;
+  transition: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .session-panel-thread [data-slot="aui_thread-viewport"],
   .session-panel,

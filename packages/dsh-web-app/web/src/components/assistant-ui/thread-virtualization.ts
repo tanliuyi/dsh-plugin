@@ -8,6 +8,20 @@ export interface ThreadTurn {
   messageIds: readonly string[];
 }
 
+const HISTORY_PREFETCH_MIN_DISTANCE = 800;
+const HISTORY_PREFETCH_VIEWPORTS = 1.5;
+
+export function shouldPrefetchOlderHistory(
+  scrollTop: number,
+  clientHeight: number,
+): boolean {
+  const threshold = Math.max(
+    HISTORY_PREFETCH_MIN_DISTANCE,
+    clientHeight * HISTORY_PREFETCH_VIEWPORTS,
+  );
+  return scrollTop <= threshold;
+}
+
 export function mergeSelectedVirtualIndexes(
   indexes: readonly number[],
   selection: { start: number; end: number },

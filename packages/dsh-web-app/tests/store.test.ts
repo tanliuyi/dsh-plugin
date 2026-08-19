@@ -70,6 +70,25 @@ function installFetch(t: test.Context): void {
         result = { ok: true, value: { events: [] } }
         break
       }
+      case 'subagent.list':
+        result = {
+          ok: true,
+          value: {
+            entries: [{
+              kind: 'child',
+              id: 'child-1',
+              activity: 'inactive',
+              hasChildren: false,
+              mode: 'continuable',
+              label: 'Child session',
+            }],
+            parentAvailable: false,
+          },
+        }
+        break
+      case 'subagent.history':
+        result = { ok: true, value: { events: [], hasMore: false } }
+        break
       case 'commands/list':
         result = { ok: true, value: [] }
         break
@@ -211,4 +230,38 @@ test('boot: a valid thread URL takes precedence over the persisted session id', 
   assert.equal(useDsh.getState().currentSessionId, 'url-1')
   assert.equal(sessionCreateCount, 0)
   assert.deepEqual(sessionHistoryCalls, ['url-1'])
+})
+
+test('openSession: subagent history avoids root-session loaders and retains its mode', async (t) => {
+  installFetch(t)
+  sessionItems = [session('child-1', {
+    origin: 'subagent',
+    parentSessionId: 'parent-1',
+  })]
+  workspaceItems = [{ workspaceId: 'ws-1', path: '/workspace', sessionIds: ['child-1'] }]
+  resetStore(null)
+
+  await useDsh.getState().refreshSessions()
+  await useDsh.getState().openSession('child-1')
+
+  const methods = calls.map((call) => call.method)
+  assert.equal(methods.includes('subagent.list'), true)
+  assert.deepEqual(
+    calls.find((call) => call.method === 'subagent.history')?.payload,
+    {
+      parentSessionId: 'parent-1',
+      childSessionId: 'child-1',
+      mode: 'continuable',
+      maxMessages: 200,
+    },
+  )
+  assert.equal(methods.includes('session.history'), false)
+  assert.equal(methods.includes('session.models'), false)
+  assert.equal(methods.includes('skill.list'), false)
+  assert.equal(methods.includes('commands/list'), false)
+  assert.equal(useDsh.getState().error, null)
+  assert.equal(useDsh.getState().modelCatalogLoading, false)
+  assert.equal(useDsh.getState().skillsLoading, false)
+  assert.equal(useDsh.getState().sessions[0]?.subagentMode, 'continuable')
+  assert.equal(useDsh.getState().sessions[0]?.subagentLabel, 'Child session')
 })

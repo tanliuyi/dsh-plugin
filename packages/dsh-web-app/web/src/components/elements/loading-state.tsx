@@ -9,7 +9,8 @@ export type GenerationLoaderVariant = "dots" | "squares" | "rounded";
 export interface GenerationLoaderProps
   extends Omit<ComponentProps<"div">, "children"> {
   label: string;
-  tick: number;
+  /** Omit to use the CSS-only animation without scheduling React updates. */
+  tick?: number;
   variant?: GenerationLoaderVariant;
 }
 
@@ -26,7 +27,7 @@ export function GenerationLoader({
   className,
   ...props
 }: GenerationLoaderProps) {
-  const pixelOffset = Math.floor(tick / 3);
+  const pixelOffset = tick === undefined ? 0 : Math.floor(tick / 3);
 
   return (
     <div
@@ -43,8 +44,17 @@ export function GenerationLoader({
               className={cn(
                 "bg-foreground size-[4px] transition-opacity duration-300 motion-reduce:transition-none",
                 CELL_SHAPES[variant],
-                active ? "opacity-90" : "opacity-15",
+                tick === undefined
+                  ? "animate-pulse opacity-15 [animation-duration:900ms] motion-reduce:animate-none"
+                  : active
+                    ? "opacity-90"
+                    : "opacity-15",
               )}
+              style={
+                tick === undefined
+                  ? { animationDelay: `${index * 100}ms` }
+                  : undefined
+              }
             />
           );
         })}

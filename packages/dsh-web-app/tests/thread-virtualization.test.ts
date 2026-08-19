@@ -4,8 +4,16 @@ import assert from 'node:assert/strict'
 import {
   buildThreadTurns,
   mergeSelectedVirtualIndexes,
+  shouldPrefetchOlderHistory,
   stabilizeThreadTurnIds,
 } from '../web/src/components/assistant-ui/thread-virtualization.ts'
+
+test('history prefetch starts before reaching the top', () => {
+  assert.equal(shouldPrefetchOlderHistory(1_201, 800), false)
+  assert.equal(shouldPrefetchOlderHistory(1_200, 800), true)
+  assert.equal(shouldPrefetchOlderHistory(800, 400), true)
+  assert.equal(shouldPrefetchOlderHistory(801, 400), false)
+})
 
 test('buildThreadTurns starts a turn at each user message', () => {
   assert.deepEqual(buildThreadTurns([

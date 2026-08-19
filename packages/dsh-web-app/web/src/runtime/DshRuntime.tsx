@@ -1,7 +1,7 @@
 /** ExternalStoreRuntime 适配：把 zustand store 的 DshMessage 桥接给 assistant-ui。
  *  附件：SimpleImageAttachmentAdapter（dataURL）→ session.prompt 的 image parts。 */
 
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import {
   AssistantRuntimeProvider,
   SimpleImageAttachmentAdapter,
@@ -58,6 +58,9 @@ function convertDshMessage(message: DshMessage): ThreadMessageLike {
     if (part.type === 'context') {
       return [{ type: 'data' as const, name: 'dsh-context', data: { label: part.label, text: part.text } }]
     }
+    if (part.type === 'compaction') {
+      return [{ type: 'data' as const, name: 'dsh-compaction', data: part }]
+    }
     if (part.type === 'generation-status') {
       return [{
         type: 'data' as const,
@@ -80,6 +83,7 @@ function convertDshMessage(message: DshMessage): ThreadMessageLike {
           commandName: part.name,
           args: part.args,
           outcome: part.outcome,
+          compaction: part.compaction,
         },
       }]
     }
@@ -179,6 +183,46 @@ async function sendSubagentPrompt(
 
 export function DshRuntimeProvider({ children }: { children: React.ReactNode }) {
   const messages = useDsh((s) => s.messages)
+  const previousMessagesRef = useRef<readonly DshMessage[]>(messages)
+  const historyJoinBoundaryIdsRef = useRef<ReadonlySet<string>>(new Set())
+  const historyJoinBoundaryIds = useMemo(() => {
+    const previousMessages = previousMessagesRef.current
+    let next = historyJoinBoundaryIdsRef.current
+    if (previousMessages.length > 0 && messages.length > previousMessages.length) {
+      const previousFirstId = previousMessages[0]?.id
+      const previousFirstIndex = previousFirstId
+        ? messages.findIndex((message) => message.id === previousFirstId)
+        : -1
+      if (previousFirstIndex > 0) {
+        const boundaryMessage = messages[previousFirstIndex - 1]
+        if (
+          boundaryMessage &&
+          boundaryMessage.role !== 'user' &&
+          !next.has(boundaryMessage.id)
+        ) {
+          next = new Set(next).add(boundaryMessage.id)
+        }
+      }
+    }
+    return next
+  }, [messages])
+  useEffect(() => {
+    previousMessagesRef.current = messages
+    historyJoinBoundaryIdsRef.current = historyJoinBoundaryIds
+  }, [historyJoinBoundaryIds, messages])
+  const convertMessage = useCallback((message: DshMessage) => {
+    const convertedMessage = convertDshMessage(message)
+    if (
+      convertedMessage.role !== 'assistant' ||
+      !historyJoinBoundaryIds.has(message.id)
+    ) {
+      return convertedMessage
+    }
+    return {
+      ...convertedMessage,
+      convertConfig: { joinStrategy: 'none' as const },
+    }
+  }, [historyJoinBoundaryIds])
   const isRunning = useDsh((s) => s.isRunning)
   const currentSessionId = useDsh((s) => s.currentSessionId)
   const sessions = useDsh((s) => s.sessions)
@@ -195,7 +239,7 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
   const navigateToThread = useThreadNavigation()
 
   const converted = useExternalMessageConverter({
-    callback: convertDshMessage,
+    callback: convertMessage,
     messages,
     isRunning,
     joinStrategy: 'concat-content',

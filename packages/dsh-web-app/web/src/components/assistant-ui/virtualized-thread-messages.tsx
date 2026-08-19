@@ -29,6 +29,7 @@ import {
 import {
   buildThreadTurns,
   mergeSelectedVirtualIndexes,
+  shouldPrefetchOlderHistory,
   stabilizeThreadTurnIds,
   type ThreadMessageRow,
   type ThreadTurn,
@@ -40,6 +41,16 @@ const AT_BOTTOM_THRESHOLD = 4;
 interface MessageSelectionRange {
   start: number;
   end: number;
+}
+
+interface HistoryScrollAnchorCandidate {
+  messageId: string;
+  viewportOffset: number;
+}
+
+interface HistoryScrollAnchor {
+  candidates: HistoryScrollAnchorCandidate[];
+  scrollHeight: number;
 }
 
 interface VirtualizedThreadMessagesProps {
@@ -60,21 +71,40 @@ export function VirtualizedThreadMessages({
   const loadMoreHistory = useDsh((state) => state.loadMoreHistory);
   const contentRef = useRef<HTMLDivElement>(null);
   const stickyRef = useRef(true);
-  const loadingAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const loadingAnchorRef = useRef<HistoryScrollAnchor | null>(null);
   const [selectionRange, setSelectionRange] =
     useState<MessageSelectionRange | null>(null);
+  const [historyAnchorMessageIds, setHistoryAnchorMessageIds] = useState<
+    readonly string[]
+  >([]);
   const getItemKey = useCallback(
     (index: number) => turns[index]?.id ?? index,
     [turns],
   );
   const rangeExtractor = useCallback(
     (range: Range) => {
-      const indexes = defaultRangeExtractor(range);
-      return selectionRange
-        ? mergeSelectedVirtualIndexes(indexes, selectionRange, range.count)
-        : indexes;
+      const indexes = selectionRange
+        ? mergeSelectedVirtualIndexes(
+            defaultRangeExtractor(range),
+            selectionRange,
+            range.count,
+          )
+        : defaultRangeExtractor(range);
+      const historyAnchorIndex = historyAnchorMessageIds
+        .map((messageId) =>
+          turns.findIndex((turn) => turn.messageIds.includes(messageId)),
+        )
+        .find((index) => index >= 0) ?? -1;
+      if (
+        historyAnchorIndex < 0 ||
+        historyAnchorIndex >= range.count ||
+        indexes.includes(historyAnchorIndex)
+      ) {
+        return indexes;
+      }
+      return [...indexes, historyAnchorIndex].sort((left, right) => left - right);
     },
-    [selectionRange],
+    [historyAnchorMessageIds, selectionRange, turns],
   );
   const virtualizer = useVirtualizer({
     count: turns.length,
@@ -106,6 +136,7 @@ export function VirtualizedThreadMessages({
     _delta,
     instance,
   ) => {
+    if (loadingAnchorRef.current) return false;
     const element = instance.elementsCache.get(item.key);
     const scrollElement = instance.scrollElement;
     if (!element || !scrollElement) {
@@ -117,29 +148,122 @@ export function VirtualizedThreadMessages({
     );
   };
 
+  const findMessageElement = useCallback((messageId: string) => {
+    const content = contentRef.current;
+    if (!content) return null;
+    const marker = Array.from(
+      content.querySelectorAll<HTMLElement>("[data-virtual-message-id]"),
+    ).find((element) => element.dataset.virtualMessageId === messageId);
+    return marker?.firstElementChild instanceof HTMLElement
+      ? marker.firstElementChild
+      : null;
+  }, []);
+
   const requestOlderHistory = useCallback(() => {
     const element = viewportRef.current;
-    if (!element || loadingMoreHistory || !historyHasMore) return;
+    if (
+      !element ||
+      loadingMoreHistory ||
+      loadingAnchorRef.current ||
+      !historyHasMore
+    ) {
+      return;
+    }
+    const viewportTop = element.getBoundingClientRect().top;
+    const candidates = Array.from(
+      contentRef.current?.querySelectorAll<HTMLElement>(
+        "[data-virtual-message-id]",
+      ) ?? [],
+    ).flatMap((marker) => {
+      const messageElement = marker.firstElementChild;
+      const messageId = marker.dataset.virtualMessageId;
+      if (
+        !(messageElement instanceof HTMLElement) ||
+        !messageId ||
+        messageElement.getBoundingClientRect().bottom <= viewportTop
+      ) {
+        return [];
+      }
+      return [{
+        messageId,
+        viewportOffset:
+          messageElement.getBoundingClientRect().top - viewportTop,
+      }];
+    });
+    if (candidates.length === 0) return;
+
     stickyRef.current = false;
     loadingAnchorRef.current = {
+      candidates,
       scrollHeight: element.scrollHeight,
-      scrollTop: element.scrollTop,
     };
+    setHistoryAnchorMessageIds(candidates.map((candidate) => candidate.messageId));
     void loadMoreHistory();
   }, [historyHasMore, loadMoreHistory, loadingMoreHistory, viewportRef]);
 
   useLayoutEffect(() => {
-    if (loadingMoreHistory || !loadingAnchorRef.current) return;
-    const anchor = loadingAnchorRef.current;
-    loadingAnchorRef.current = null;
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const element = viewportRef.current;
-        if (!element) return;
-        element.scrollTop = anchor.scrollTop + (element.scrollHeight - anchor.scrollHeight);
-      });
-    });
-  }, [loadingMoreHistory, turns.length, viewportRef]);
+    const historyAnchor = loadingAnchorRef.current;
+    if (loadingMoreHistory || !historyAnchor) return;
+    let anchor: HistoryScrollAnchorCandidate | undefined;
+    for (const candidate of historyAnchor.candidates) {
+      const survives = turns.some((turn) =>
+        turn.messageIds.includes(candidate.messageId),
+      );
+      if (!survives) continue;
+      anchor = candidate;
+      break;
+    }
+    // The range extractor mounts the surviving anchor in the prepend render, so
+    // the first correction can use real DOM geometry before the browser paints.
+    const viewport = viewportRef.current;
+    const previousScrollBehavior = viewport?.style.scrollBehavior ?? "";
+    if (viewport) viewport.style.scrollBehavior = "auto";
+    let frame: number | undefined;
+    let attempts = 0;
+    let previousScrollHeight = historyAnchor.scrollHeight;
+    const correctAnchor = () => {
+      if (loadingAnchorRef.current !== historyAnchor) return;
+      const viewport = viewportRef.current;
+      if (!viewport) return;
+      const anchorElement = anchor
+        ? findMessageElement(anchor.messageId)
+        : null;
+      if (anchor && anchorElement) {
+        const currentOffset =
+          anchorElement.getBoundingClientRect().top -
+          viewport.getBoundingClientRect().top;
+        const adjustment = currentOffset - anchor.viewportOffset;
+        if (Math.abs(adjustment) > 0.5) viewport.scrollTop += adjustment;
+      } else {
+        const heightDelta = viewport.scrollHeight - previousScrollHeight;
+        if (heightDelta > 0) viewport.scrollTop += heightDelta;
+      }
+      previousScrollHeight = viewport.scrollHeight;
+    };
+    const resizeObserver = new ResizeObserver(correctAnchor);
+    if (contentRef.current) resizeObserver.observe(contentRef.current);
+    correctAnchor();
+
+    const restoreAnchor = () => {
+      if (loadingAnchorRef.current !== historyAnchor) return;
+      correctAnchor();
+      attempts += 1;
+      if (attempts < 8) {
+        frame = requestAnimationFrame(restoreAnchor);
+      } else {
+        loadingAnchorRef.current = null;
+        setHistoryAnchorMessageIds([]);
+        resizeObserver.disconnect();
+        if (viewport) viewport.style.scrollBehavior = previousScrollBehavior;
+      }
+    };
+    frame = requestAnimationFrame(restoreAnchor);
+    return () => {
+      resizeObserver.disconnect();
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      if (viewport) viewport.style.scrollBehavior = previousScrollBehavior;
+    };
+  }, [findMessageElement, loadingMoreHistory, turns, viewportRef, virtualizer]);
 
   const jumpToBottom = useCallback(() => {
     stickyRef.current = true;
@@ -164,7 +288,7 @@ export function VirtualizedThreadMessages({
       const atBottom =
         element.scrollHeight - element.scrollTop - element.clientHeight <=
         AT_BOTTOM_THRESHOLD;
-      if (atBottom) stickyRef.current = true;
+      if (atBottom && !loadingAnchorRef.current) stickyRef.current = true;
       else if (
         element.scrollTop < lastScrollTop &&
         element.scrollHeight === lastScrollHeight &&
@@ -172,10 +296,29 @@ export function VirtualizedThreadMessages({
       ) {
         stickyRef.current = false;
       }
+      const loadingAnchor = loadingAnchorRef.current;
+      if (loadingMoreHistory && loadingAnchor) {
+        const viewportTop = element.getBoundingClientRect().top;
+        loadingAnchor.candidates = loadingAnchor.candidates.map((candidate) => {
+          const messageElement = findMessageElement(candidate.messageId);
+          return messageElement
+            ? {
+                ...candidate,
+                viewportOffset:
+                  messageElement.getBoundingClientRect().top - viewportTop,
+              }
+            : candidate;
+        });
+        loadingAnchor.scrollHeight = element.scrollHeight;
+      }
       lastScrollTop = element.scrollTop;
       lastScrollHeight = element.scrollHeight;
       lastClientHeight = element.clientHeight;
-      if (element.scrollTop <= 320) requestOlderHistory();
+      if (
+        shouldPrefetchOlderHistory(element.scrollTop, element.clientHeight)
+      ) {
+        requestOlderHistory();
+      }
     };
     const onWheel = (event: WheelEvent) => {
       if (event.deltaY < 0) stickyRef.current = false;
@@ -191,7 +334,7 @@ export function VirtualizedThreadMessages({
       element.removeEventListener("wheel", onWheel);
       element.removeEventListener("touchmove", disarm);
     };
-  }, [requestOlderHistory, viewportRef]);
+  }, [findMessageElement, loadingMoreHistory, requestOlderHistory, viewportRef]);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -285,40 +428,44 @@ export function VirtualizedThreadMessages({
     () => ({ Message: messageComponent }),
     [messageComponent],
   );
+  const showHistoryLoader =
+    historyHasMore || loadingMoreHistory || historyLoadError !== null;
+  const restoringHistory =
+    loadingMoreHistory || historyAnchorMessageIds.length > 0;
 
   return (
     <div
       ref={contentRef}
       data-slot="aui_virtualized-message-list"
+      data-history-restoring={restoringHistory || undefined}
       className="[overflow-anchor:none]"
       style={{ paddingTop, paddingBottom }}
     >
-      {(historyHasMore || loadingMoreHistory || historyLoadError) && (
-        <div
-          data-slot="aui_history-loader"
-          className="text-muted-foreground flex min-h-9 items-center justify-center gap-2 pb-3 text-xs"
-          role="status"
-        >
-          {loadingMoreHistory ? (
-            <>
-              <LoaderCircleIcon className="size-3.5 animate-spin" />
-              <span>Loading earlier messages</span>
-            </>
-          ) : historyLoadError ? (
-            <button
-              type="button"
-              onClick={requestOlderHistory}
-              className="hover:text-foreground inline-flex items-center gap-1.5 transition-colors"
-              title={historyLoadError}
-            >
-              <RotateCcwIcon className="size-3.5" />
-              Retry loading earlier messages
-            </button>
-          ) : (
-            <span>Scroll up to load earlier messages</span>
-          )}
-        </div>
-      )}
+      <div
+        data-slot="aui_history-loader"
+        className={`text-muted-foreground flex min-h-9 items-center justify-center gap-2 pb-3 text-xs ${showHistoryLoader ? "" : "invisible"}`}
+        role={showHistoryLoader ? "status" : undefined}
+        aria-hidden={showHistoryLoader ? undefined : true}
+      >
+        {loadingMoreHistory ? (
+          <>
+            <LoaderCircleIcon className="size-3.5 animate-spin" />
+            <span>Loading earlier messages</span>
+          </>
+        ) : historyLoadError ? (
+          <button
+            type="button"
+            onClick={requestOlderHistory}
+            className="hover:text-foreground inline-flex items-center gap-1.5 transition-colors"
+            title={historyLoadError}
+          >
+            <RotateCcwIcon className="size-3.5" />
+            Retry loading earlier messages
+          </button>
+        ) : (
+          <span>Scroll up to load earlier messages</span>
+        )}
+      </div>
       {items.map((item) => {
         const turn = turns[item.index];
         if (!turn) return null;
@@ -336,11 +483,16 @@ export function VirtualizedThreadMessages({
             }
           >
             {turn.messageIds.map((messageId) => (
-              <ThreadPrimitive.Unstable_MessageById
+              <div
                 key={messageId}
-                messageId={messageId}
-                components={messageComponents}
-              />
+                className="contents"
+                data-virtual-message-id={messageId}
+              >
+                <ThreadPrimitive.Unstable_MessageById
+                  messageId={messageId}
+                  components={messageComponents}
+                />
+              </div>
             ))}
           </div>
         );

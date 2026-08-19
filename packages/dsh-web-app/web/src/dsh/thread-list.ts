@@ -13,6 +13,7 @@ export interface ThreadListGroup {
 export interface ThreadListProjection {
   sessions: SessionView[]
   groups: ThreadListGroup[]
+  childrenByParent: Record<string, string[]>
 }
 
 function sessionOrder(ids: readonly string[], byId: Map<string, SessionView>, orderBy: ThreadListViewState['orderBy']): string[] {
@@ -30,36 +31,64 @@ function workspaceLabel(workspace: WorkspaceView): string {
 
 export function deriveThreadListProjection(sessions: readonly SessionView[], workspaces: readonly WorkspaceView[], archivedSessionIds: readonly string[], view: ThreadListViewState): ThreadListProjection {
   const archived = new Set(archivedSessionIds)
-  const byId = new Map(sessions.filter((session) => !session.blank && !archived.has(session.sessionId)).map((session) => [session.sessionId, session]))
+  const visible = sessions.filter((session) => !session.blank && !archived.has(session.sessionId))
+  const byId = new Map(visible.map((session) => [session.sessionId, session]))
+  const childIds = new Set<string>()
+  const childrenByParentMap = new Map<string, string[]>()
+
+  for (const session of visible) {
+    if (session.origin !== 'subagent' || !session.parentSessionId || !byId.has(session.parentSessionId)) continue
+    childIds.add(session.sessionId)
+    const children = childrenByParentMap.get(session.parentSessionId) ?? []
+    children.push(session.sessionId)
+    childrenByParentMap.set(session.parentSessionId, children)
+  }
+  for (const [parentId, ids] of childrenByParentMap) {
+    childrenByParentMap.set(parentId, sessionOrder(ids, byId, view.orderBy))
+  }
+  const childrenByParent = Object.fromEntries(childrenByParentMap)
+
+  const appendTree = (sessionId: string, ordered: SessionView[], seen: Set<string>) => {
+    if (seen.has(sessionId)) return
+    const session = byId.get(sessionId)
+    if (!session) return
+    seen.add(sessionId)
+    ordered.push(session)
+    for (const childId of childrenByParent[sessionId] ?? []) appendTree(childId, ordered, seen)
+  }
 
   if (view.groupBy === 'flat') {
-    const flat = [...byId.values()].sort((a, b) => {
-      const updatedDiff = b.updatedAt - a.updatedAt
-      return updatedDiff !== 0 ? updatedDiff : a.sessionId.localeCompare(b.sessionId)
-    })
-    return { sessions: flat, groups: [] }
+    const rootIds = sessionOrder(visible.filter((session) => !childIds.has(session.sessionId)).map((session) => session.sessionId), byId, 'updated')
+    const flat: SessionView[] = []
+    const seen = new Set<string>()
+    for (const rootId of rootIds) appendTree(rootId, flat, seen)
+    return { sessions: flat, groups: [], childrenByParent }
   }
 
   const accounted = new Set<string>()
   const groups: ThreadListGroup[] = []
   const orderedSessions: SessionView[] = []
+  const orderedSeen = new Set<string>()
 
   for (const workspace of workspaces) {
     const ids = workspace.sessionIds.filter((id) => {
+      if (childIds.has(id)) return false
       accounted.add(id)
       return byId.has(id)
     })
     const sessionIds = sessionOrder(ids, byId, view.orderBy)
-    orderedSessions.push(...sessionIds.map((id) => byId.get(id)!))
+    for (const id of sessionIds) appendTree(id, orderedSessions, orderedSeen)
     groups.push({ key: workspace.workspaceId, workspaceId: workspace.workspaceId, label: workspaceLabel(workspace), path: workspace.path, sessionIds, expanded: view.expandedGroups.includes(workspace.workspaceId) })
   }
 
-  const ungroupedIds = sessions.filter((session) => !session.blank && byId.has(session.sessionId) && !accounted.has(session.sessionId)).map((session) => session.sessionId)
+  const ungroupedIds = visible
+    .filter((session) => !childIds.has(session.sessionId) && !accounted.has(session.sessionId))
+    .map((session) => session.sessionId)
   const ungroupedSessionIds = sessionOrder(ungroupedIds, byId, view.orderBy)
   if (ungroupedSessionIds.length > 0) {
-    orderedSessions.push(...ungroupedSessionIds.map((id) => byId.get(id)!))
+    for (const id of ungroupedSessionIds) appendTree(id, orderedSessions, orderedSeen)
     groups.push({ key: '', label: 'Ungrouped', sessionIds: ungroupedSessionIds, expanded: view.expandedGroups.includes('') })
   }
 
-  return { sessions: orderedSessions, groups }
+  return { sessions: orderedSessions, groups, childrenByParent }
 }

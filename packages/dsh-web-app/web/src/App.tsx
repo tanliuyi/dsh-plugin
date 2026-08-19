@@ -160,11 +160,6 @@ export default function App() {
           >
             <MenuIcon className="size-4" />
           </TooltipIconButton>
-          {error && (
-            <div role="alert" className="absolute inset-x-0 top-0 z-50 border-b border-destructive/40 bg-destructive/10 px-4 py-1.5 text-destructive">
-              {error}
-            </div>
-          )}
           <div className="flex min-h-0 flex-1 flex-col">
             <Outlet />
           </div>

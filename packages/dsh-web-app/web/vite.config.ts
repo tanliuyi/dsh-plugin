@@ -17,6 +17,18 @@ export default defineConfig({
       '@': src('src'),
     },
   },
+  optimizeDeps: {
+    // React and Lexical import different core export paths. Make every path an
+    // optimizer entry so both packages reference one shared core instance.
+    include: [
+      '@assistant-ui/core',
+      '@assistant-ui/core/internal',
+      '@assistant-ui/core/react',
+      '@assistant-ui/core/store',
+      '@assistant-ui/react',
+      '@assistant-ui/react-lexical',
+    ],
+  },
   build: {
     outDir: src('dist'),
     emptyOutDir: true,

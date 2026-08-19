@@ -417,14 +417,14 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
               className="text-muted-foreground flex min-h-8 w-full cursor-default items-center gap-1.5 px-2.5 pt-2 pb-1 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             >
               {!group.expanded ? (
-                <FolderIcon className="size-3.5 shrink-0" />
+                <FolderIcon className="size-4 shrink-0" />
               ) : (
-                <FolderOpenIcon className="size-3.5 shrink-0" />
+                <FolderOpenIcon className="size-4 shrink-0" />
               )}
-              <span className="min-w-0 truncate">{group.label}</span>
+              <span className="min-w-0 text-sm truncate">{group.label}</span>
               <div
                 data-slot="aui_thread-list-group-actions"
-                className="ms-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover/workspace:opacity-100 group-focus-within/workspace:opacity-100 group-has-data-[state=open]/workspace:opacity-100"
+                className="ms-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover/workspace:opacity-100"
                 onClick={(event) => event.stopPropagation()}
                 onKeyDown={(event) => event.stopPropagation()}
               >
@@ -703,14 +703,14 @@ export const ThreadListItem: FC = () => {
             <CircleAlertIcon
               aria-hidden
               data-slot="aui_thread-list-item-pending-request"
-              className="absolute left-0 text-warning me-1.5 size-3.5 shrink-0"
+              className="text-warning absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2"
             />
           )}
           {!isPendingRequest && isRunning && (
             <Loader2Icon
               aria-hidden
               data-slot="aui_thread-list-item-running"
-              className="text-muted-foreground me-1.5 size-3.5 shrink-0 animate-spin"
+              className="text-muted-foreground absolute start-2.5 top-1/2 size-3.5 -translate-y-1/2 animate-spin"
             />
           )}
           <span

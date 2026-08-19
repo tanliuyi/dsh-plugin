@@ -71,6 +71,7 @@ tests/            #   Playwright 端到端验证
 - [x] 多 step turn 的运行态：工具完成和中间 assistant message 不会提前结束，只有 turn/end 或 host status 结束
 - [x] 上下文注入折叠、图片 hydration、工具错误卡片、审批/提问应答
 - [x] queue/jobs/projection、goal、model/reasoning、agent preset、subagent 基础能力
+- [x] `todo/write` 全表替换 projection（空数组隐藏计划条）、`turn/start` 清空且 `turn/end` 保留、composer 计划条和 `todo_write` 专用摘要行（支持并行任务）
 - [x] settings namespace JSON 编辑、远端 session 搜索、workspace 分组/平铺/排序
 - [x] tailwind v4 + shadcn 主题（深色/浅色，跟随系统）
 

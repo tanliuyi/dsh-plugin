@@ -8,6 +8,7 @@ import {
 } from '@tanstack/react-router'
 import App from './App'
 import { ConversationHeader } from './components/conversation-header'
+import { SessionPanelProvider } from './components/session-panel'
 import { ThreadRoot } from './components/assistant-ui/thread'
 import { useDsh } from './dsh/store'
 
@@ -27,12 +28,12 @@ function ConversationSurface({
   hydrated?: boolean
 }) {
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <SessionPanelProvider>
       <ConversationHeader />
-      <div className="min-h-0 flex-1">
+      <div data-slot="session-panel-thread" className="session-panel-thread min-h-0 flex-1">
         <ThreadRoot key={threadId ?? 'empty'} sessionId={threadId} hydrated={hydrated} />
       </div>
-    </div>
+    </SessionPanelProvider>
   )
 }
 

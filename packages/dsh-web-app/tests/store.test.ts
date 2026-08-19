@@ -102,6 +102,7 @@ function resetStore(currentSessionId: string | null): void {
     newSessionPermissionPreset: null,
     currentSessionId,
     goal: null,
+    todos: undefined,
     planMode: false,
     contextUsage: undefined,
     messages: [],

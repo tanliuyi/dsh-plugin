@@ -145,7 +145,7 @@
 
 @layer base {
   * {
-    @apply outline-ring/50;
+    @apply border-border outline-ring/50;
     scrollbar-width: thin;
     scrollbar-color: var(--scrollbar-thumb) transparent;
   }
@@ -157,6 +157,11 @@
   html {
     @apply font-sans text-base;
   }
+}
+
+body.is-resizing-column {
+  cursor: col-resize;
+  user-select: none;
 }
 
 @custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
@@ -258,4 +263,72 @@
 
 .dark .aui-directive-chip-placeholder {
   color: color-mix(in oklab, var(--muted-foreground) 78%, transparent);
+}
+
+/* Fixed session inspector. The nested container query lets the panel reserve
+   thread width only when the conversation surface itself has room for it. */
+.session-panel-layout {
+  --session-panel-width: 22rem;
+  --session-panel-gap: 1rem;
+  container-name: session-panel-layout;
+  container-type: inline-size;
+}
+
+.session-panel-thread {
+  min-width: 0;
+}
+
+.session-panel-thread [data-slot="aui_thread-viewport"] {
+  transition: padding-inline-end 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.session-panel {
+  top: calc(3rem + 1rem);
+  right: var(--session-panel-gap);
+  width: min(var(--session-panel-width), calc(100vw - 4rem));
+  border-radius: 16px;
+  transform-origin: calc(100% - 1.25rem) -3rem;
+  transition:
+    clip-path 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 180ms ease,
+    transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s linear;
+}
+
+.session-panel[data-state="open"] {
+  visibility: visible;
+  clip-path: circle(150% at calc(100% - 1.25rem) -3rem);
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.session-panel[data-state="closed"] {
+  visibility: hidden;
+  clip-path: circle(0 at calc(100% - 1.25rem) -3rem);
+  opacity: 0;
+  transform: translate3d(0.75rem, -0.75rem, 0) scale(0.92);
+  pointer-events: none;
+  transition-delay: 0s, 0s, 0s, 260ms;
+}
+
+.session-panel-trigger svg {
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.session-panel-trigger:active svg {
+  transform: scale(0.82);
+}
+
+@container session-panel-layout (min-width: 68rem) {
+  .session-panel-layout[data-panel-state="open"] .session-panel-thread [data-slot="aui_thread-viewport"] {
+    padding-inline-end: calc(var(--session-panel-width) + var(--session-panel-gap) * 2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-panel-thread [data-slot="aui_thread-viewport"],
+  .session-panel,
+  .session-panel-trigger svg {
+    transition-duration: 0.01ms;
+  }
 }

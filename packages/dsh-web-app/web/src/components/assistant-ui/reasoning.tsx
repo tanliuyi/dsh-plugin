@@ -25,6 +25,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { followResizingContentToBottom } from "@/lib/follow-resizing-content-to-bottom";
 
 const ANIMATION_DURATION = 200;
 
@@ -262,43 +263,11 @@ function ReasoningText({
     const scrollEl = scrollRef.current;
     const contentEl = contentRef.current;
     if (!scrollEl || !contentEl) return;
-
-    let pinned = true;
-    let lastScrollTop = scrollEl.scrollTop;
-    let lastScrollHeight = scrollEl.scrollHeight;
-    const isAtBottom = () =>
-      Math.abs(
-        scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight,
-      ) <= 1 || scrollEl.scrollHeight <= scrollEl.clientHeight;
-
-    const pin = () => {
-      if (!pinned) return;
-      scrollEl.scrollTop = scrollEl.scrollHeight;
-    };
-    // A pin's own scroll event can arrive after new content grew the scroll
-    // height and read as "not at bottom"; only an upward move at unchanged
-    // scroll height is user intent.
-    const onScroll = () => {
-      if (isAtBottom()) {
-        pinned = true;
-      } else if (
-        scrollEl.scrollTop < lastScrollTop &&
-        scrollEl.scrollHeight === lastScrollHeight
-      ) {
-        pinned = false;
-      }
-      lastScrollTop = scrollEl.scrollTop;
-      lastScrollHeight = scrollEl.scrollHeight;
-    };
-
-    pin();
-    scrollEl.addEventListener("scroll", onScroll);
-    const observer = new ResizeObserver(pin);
-    observer.observe(contentEl);
-    return () => {
-      scrollEl.removeEventListener("scroll", onScroll);
-      observer.disconnect();
-    };
+    // 写入合并到 rAF：一帧最多一次 `scrollTop = scrollHeight`，避免折叠
+    // 动画/流式增长期间多路同步写入互相竞争造成布局抖动与页面闪烁。
+    return followResizingContentToBottom(scrollEl, contentEl, {
+      respectUserScroll: true,
+    });
   }, [isPreview]);
 
   return (

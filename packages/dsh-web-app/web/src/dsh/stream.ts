@@ -1,6 +1,6 @@
 /** Upstream-compatible WebSocket downlink connection manager. */
 
-import { type JobView, type QueueMessage, type ServerRequest, type WorkspaceView } from './api'
+import { type JobView, type QueueMessage, type QueueMessagePart, type ServerRequest, type WorkspaceView } from './api'
 import { useDsh } from './store'
 
 function wsUrl(path: string): string {
@@ -18,7 +18,11 @@ interface MuxFrame {
   questions?: unknown[]
   approvalId?: string
   error?: { message?: string }
-  items?: Array<{ id: string; placement: QueueMessage['placement']; message?: { content?: Array<{ type?: string; text?: string }> } }>
+  items?: Array<{
+    id: string
+    placement: QueueMessage['placement']
+    message?: { id?: string; content?: unknown[] }
+  }>
   lastSeq?: number
   jobs?: JobView[]
   key?: string
@@ -30,6 +34,27 @@ type HostFrame = JsonRecord & { type: string }
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null
+}
+
+/** Preserve each queue occurrence's own text/image content, as upstream does. */
+export function queuePartsOf(content: unknown[] | undefined): QueueMessagePart[] {
+  if (!content) return []
+  return content.flatMap((block): QueueMessagePart[] => {
+    if (!isRecord(block)) return []
+    if (block.type === 'text' && typeof block.text === 'string') {
+      return [{ type: 'text', text: block.text }]
+    }
+    if (block.type !== 'image') return []
+    const attachment = isRecord(block.attachment) ? block.attachment : block
+    const attachmentId = String(attachment.attachmentId ?? attachment.id ?? '')
+    if (!attachmentId) return []
+    return [{
+      type: 'image',
+      attachmentId,
+      ...(typeof attachment.mediaType === 'string' ? { mediaType: attachment.mediaType } : {}),
+      ...(typeof attachment.name === 'string' ? { name: attachment.name } : {}),
+    }]
+  })
 }
 
 function isServerRequest(value: unknown): value is ServerRequest {
@@ -138,11 +163,16 @@ function startGeneration(): void {
     } else if (payload.type === 'question/resolved' && typeof payload.questionRpcId === 'string') {
       store.getState().resolveInteraction(payload.questionRpcId)
     } else if (payload.type === 'session/queue' && payload.sessionId && Array.isArray(payload.items)) {
-      store.getState().setQueueSnapshot(payload.sessionId, payload.items.map((item) => ({
-        id: item.id,
-        placement: item.placement,
-        text: item.message?.content?.filter((part) => part.type === 'text').map((part) => part.text ?? '').join(' ').trim() || 'Queued message',
-      })))
+      store.getState().setQueueSnapshot(payload.sessionId, payload.items.map((item) => {
+        const parts = queuePartsOf(item.message?.content)
+        return {
+          id: item.id,
+          ...(item.message?.id ? { messageId: item.message.id } : {}),
+          placement: item.placement,
+          parts,
+          text: parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('').trim() || 'Queued message',
+        }
+      }))
     } else if (payload.type === 'session/jobs' && payload.sessionId && Array.isArray(payload.jobs)) {
       store.getState().setJobsSnapshot(payload.sessionId, payload.jobs)
     } else if (payload.type === 'session/projection' && payload.sessionId && typeof payload.key === 'string' && typeof payload.seq === 'number') {

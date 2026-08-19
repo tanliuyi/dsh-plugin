@@ -31,7 +31,7 @@ export function GenerationLoader({
   return (
     <div
       data-slot="generation-loader"
-      className={cn("flex flex-row items-center gap-1", className)}
+      className={cn("flex flex-row items-center gap-2", className)}
       {...props}
     >
       <div aria-hidden className="grid grid-cols-3 gap-0.5">
@@ -49,7 +49,7 @@ export function GenerationLoader({
           );
         })}
       </div>
-      <ShimmerLabel className="text-foreground/55 relative inline-block text-sm">
+      <ShimmerLabel className="text-foreground/55 relative inline-block text-sm/4">
         {label}
       </ShimmerLabel>
     </div>

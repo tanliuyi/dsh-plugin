@@ -5,7 +5,9 @@ import {
   type ToolCallMessagePartComponent,
   type ToolCallMessagePartStatus,
 } from "@assistant-ui/react";
+import { TerminalBlock } from "@/components/elements/terminal-block";
 import { ToolCall } from "@/components/elements/tool-call";
+import { terminalToolDataOf } from "@/lib/terminal-tool";
 
 const TOOL_ACTIONS: Record<
   string,
@@ -77,8 +79,7 @@ function requestTextOf(argsText: string | undefined): string {
 
 function shortenQuery(value: string): string {
   const trimmed = value.trim();
-  if (trimmed.length <= 64) return trimmed;
-  return `${trimmed.slice(0, 61)}...`;
+  return trimmed;
 }
 
 function queryOf(toolName: string, argsText: string | undefined): string {
@@ -126,10 +127,34 @@ export const AssistantToolCall: ToolCallMessagePartComponent = ({
   const success =
     !isError && (status === undefined || status.type === "complete");
   const action = actionOf(toolName);
+  const terminal = terminalToolDataOf(
+    toolName,
+    argsText,
+    result,
+    status?.type,
+    isError,
+  );
 
   useEffect(() => {
     if (status?.type === "requires-action") setOpen(true);
   }, [status?.type]);
+
+  if (terminal) {
+    return (
+      <ToolCall
+        label={action.label}
+        activeLabel={action.activeLabel}
+        query={queryOf(toolName, argsText)}
+        request={requestTextOf(argsText)}
+        result={resultTextOf(result, status, isError)}
+        running={!terminal.done}
+        success={terminal.success}
+        open={open}
+        onOpenChange={setOpen}
+        content={<TerminalBlock {...terminal} className="mt-2 max-w-full" />}
+      />
+    );
+  }
 
   return (
     <ToolCall

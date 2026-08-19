@@ -2,7 +2,7 @@
 
 export type DshMessagePart =
   | { type: 'text'; text: string }
-  | /** 活跃 turn 中注入的用户输入（上游 SteeringMessageNode）：紧凑独立行，不是 user 气泡。 */
+  | /** 活跃 turn 中注入的用户输入（上游 SteeringMessageNode）：复用 user-style 气泡。 */
   { type: 'steering'; text: string }
   | { type: 'image'; attachmentId: string; mediaType?: string; name?: string; src?: string }
   | { type: 'reasoning'; text: string }
@@ -18,6 +18,14 @@ export type DshMessagePart =
   }
   /** 模型可见但用户弱化的上下文注入（runtime context、skill 目录等），折叠显示。 */
   | { type: 'context'; label: string; text: string }
+  | {
+    type: 'generation-status'
+    state: 'error' | 'retrying'
+    title: string
+    detail: string
+    retry?: number
+    maxRetries?: number
+  }
   | {
     type: 'command'
     commandId: string
@@ -38,7 +46,7 @@ export interface FoldableSessionEvent {
 export interface DshMessage {
   /** 稳定 id：优先取 wire 上的 messageId/callId，否则用事件 seq。 */
   id: string
-  /** steering：被 next-step inbox claim 的 user 输入，渲染为独立 steering 行。 */
+  /** steering：被 next-step inbox claim 的 user 输入，渲染为 user-style steering 气泡。 */
   role: 'user' | 'assistant' | 'steering'
   parts: DshMessagePart[]
   createdAt?: number
@@ -199,13 +207,49 @@ function applyAssistantChunk(messages: DshMessage[], data: Record<string, unknow
 }
 
 /** 解析最终 assistant/message；实时 partial 会在同一 turn/step 上原地替换。 */
+function generationStatusId(data: Record<string, unknown>): string {
+  return `generation-status-${String(data.turn ?? 'unknown')}-${String(data.step ?? '0')}`
+}
+
+function withoutGenerationStatus(messages: DshMessage[], data: Record<string, unknown>): DshMessage[] {
+  const id = generationStatusId(data)
+  return messages.some((message) => message.id === id)
+    ? messages.filter((message) => message.id !== id)
+    : messages
+}
+
+function failureDetail(value: unknown): string {
+  if (typeof value === 'string' && value !== '') return value
+  if (typeof value !== 'object' || value === null) return 'The model request failed.'
+  const failure = value as Record<string, unknown>
+  const message = typeof failure.message === 'string' ? failure.message : 'The model request failed.'
+  const code = typeof failure.code === 'string' ? failure.code : undefined
+  return code ? `${message} (${code})` : message
+}
+
+function upsertGenerationStatus(
+  messages: DshMessage[],
+  data: Record<string, unknown>,
+  base: { seq: number; createdAt: number },
+  part: Extract<DshMessagePart, { type: 'generation-status' }>,
+): DshMessage[] {
+  const id = generationStatusId(data)
+  const message: DshMessage = { id, role: 'assistant', parts: [part], ...base }
+  const index = messages.findIndex((item) => item.id === id)
+  if (index < 0) return [...messages, message]
+  const next = [...messages]
+  next[index] = message
+  return next
+}
+
 function finalizedAssistantMessage(messages: DshMessage[], data: Record<string, unknown>, base: { seq: number; createdAt: number }, parts: DshMessagePart[]): DshMessage[] {
+  const clean = withoutGenerationStatus(messages, data)
   const message = data.message as Record<string, unknown> | undefined
   const id = messageIdOf(message, `a-${base.seq}`)
   const finalized: DshMessage = { id, role: 'assistant', parts, ...base }
-  const partialIndex = messages.findIndex((item) => item.id === partialMessageId(data))
-  if (partialIndex < 0) return [...messages, finalized]
-  const result = [...messages]
+  const partialIndex = clean.findIndex((item) => item.id === partialMessageId(data))
+  if (partialIndex < 0) return [...clean, finalized]
+  const result = [...clean]
   result[partialIndex] = finalized
   return result
 }
@@ -260,7 +304,52 @@ export function foldEvent(
       return { messages: [...messages, msg] }
     }
     case 'assistant/chunk': {
-      return { messages: applyAssistantChunk(messages, data, base), isRunning: true }
+      const chunk = (data.chunk ?? {}) as Record<string, unknown>
+      if (chunk.type === 'finish') {
+        const reason = (chunk.reason ?? {}) as Record<string, unknown>
+        if (reason.kind !== 'error') return { messages: withoutGenerationStatus(messages, data), isRunning: true }
+        return {
+          messages: upsertGenerationStatus(messages, data, base, {
+            type: 'generation-status',
+            state: 'error',
+            title: 'Request failed',
+            detail: failureDetail(reason.failure),
+          }),
+          isRunning: true,
+        }
+      }
+      return { messages: applyAssistantChunk(withoutGenerationStatus(messages, data), data, base), isRunning: true }
+    }
+    case 'llm/retry': {
+      const retry = typeof data.retry === 'number' ? data.retry : undefined
+      const maxRetries = typeof data.maxRetries === 'number' ? data.maxRetries : undefined
+      const progress = retry === undefined ? '' : maxRetries === undefined ? `Attempt ${retry}` : `Attempt ${retry} of ${maxRetries}`
+      return {
+        messages: upsertGenerationStatus(messages, data, base, {
+          type: 'generation-status',
+          state: 'retrying',
+          title: 'Retrying request',
+          detail: [progress, failureDetail(data.failure)].filter(Boolean).join(' - '),
+          ...(retry === undefined ? {} : { retry }),
+          ...(maxRetries === undefined ? {} : { maxRetries }),
+        }),
+        isRunning: true,
+      }
+    }
+    case 'llm/retry-started': {
+      const id = generationStatusId(data)
+      const existing = messages.find((message) => message.id === id)
+      if (!existing) return { messages, isRunning: true }
+      return {
+        messages: upsertGenerationStatus(messages, data, base, {
+          type: 'generation-status',
+          state: 'retrying',
+          title: 'Retrying request',
+          detail: existing.parts[0]?.type === 'generation-status' ? existing.parts[0].detail : 'Starting another attempt.',
+          ...(typeof data.retry === 'number' ? { retry: data.retry } : {}),
+        }),
+        isRunning: true,
+      }
     }
     case 'assistant/message': {
       if (ev.surfaceOp !== undefined && ev.surfaceOp !== 'append') return null

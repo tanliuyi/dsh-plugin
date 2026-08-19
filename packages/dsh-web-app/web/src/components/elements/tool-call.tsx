@@ -76,8 +76,12 @@ export interface ToolCallProps {
   label: string;
   activeLabel: string;
   query: string;
+  /** Optional non-shrinking suffix for summaries such as parallel todo counts. */
+  querySuffix?: ReactNode;
   request: string;
   result: string;
+  /** Optional custom content for tool-specific renderers such as TerminalBlock. */
+  content?: ReactNode;
   running: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -90,8 +94,10 @@ export function ToolCall({
   label,
   activeLabel,
   query,
+  querySuffix,
   request,
   result,
+  content,
   running,
   open,
   onOpenChange,
@@ -103,11 +109,11 @@ export function ToolCall({
       data-slot="tool-call"
       open={open}
       onOpenChange={onOpenChange}
-      className={cn("w-full max-w-sm", className)}
+      className={cn("w-full", className)}
     >
-      <CollapsibleTrigger className="group/trigger text-foreground/55 hover:text-foreground/90 flex items-center gap-2 rounded-md py-1 text-[13.5px] transition-colors outline-none">
-        <ChevronRightIcon className="size-3.5 shrink-0 opacity-60 transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-open/trigger:rotate-90 group-data-panel-open/trigger:rotate-90 motion-reduce:transition-none" />
-        <SwapLabel active={running ? 0 : 1} className="text-start">
+      <CollapsibleTrigger className="group/trigger max-w-full text-foreground/55 hover:text-foreground/90 flex items-center gap-2 rounded-md py-1 text-[13.5px] transition-colors outline-none">
+        {/* <ChevronRightIcon className="size-3.5 shrink-0 opacity-60 transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-open/trigger:rotate-90 group-data-panel-open/trigger:rotate-90 motion-reduce:transition-none" /> */}
+        <SwapLabel active={running ? 0 : 1} className="text-start flex-shrink-0">
           <ShimmerLabel
             active={running}
             className="relative inline-block leading-none"
@@ -119,12 +125,17 @@ export function ToolCall({
         <span
           className={cn(
             mono,
-            "bg-foreground/[0.06] text-foreground/70 min-w-0 max-w-48 truncate rounded-md px-1.5 py-0.5",
+            "bg-foreground/[0.06] text-foreground/70 min-w-0 truncate rounded-md px-1.5 py-0.5",
           )}
           title={query}
         >
           {query}
         </span>
+        {querySuffix !== undefined && querySuffix !== null && (
+          <span className="shrink-0 text-xs tabular-nums text-foreground/50">
+            {querySuffix}
+          </span>
+        )}
         <span className="ms-auto flex w-4 shrink-0 items-center justify-end">
           {!running &&
             (success ? (
@@ -135,21 +146,23 @@ export function ToolCall({
         </span>
       </CollapsibleTrigger>
       <CollapsibleContent className={cn(collapsePanel, "outline-none")}>
-        <div className={cn(field, "mt-2 overflow-hidden rounded-2xl text-xs")}>
-          <div className="px-3.5 pt-2.5 pb-2">
-            <p className={cn(mono, "text-foreground/35 mb-1")}>Request</p>
-            <p className="text-foreground/55 max-h-48 overflow-auto font-mono break-words whitespace-pre-wrap">
-              {request}
-            </p>
+        {content ?? (
+          <div className={cn(field, "mt-2 overflow-hidden rounded-2xl text-xs")}>
+            <div className="px-3.5 pt-2.5 pb-2">
+              <p className={cn(mono, "text-foreground/35 mb-1")}>Request</p>
+              <p className="text-foreground/55 max-h-48 overflow-auto font-mono break-words whitespace-pre-wrap">
+                {request}
+              </p>
+            </div>
+            <div className="bg-foreground/[0.06] mx-3.5 h-px" />
+            <div className="px-3.5 pt-2 pb-2.5">
+              <p className={cn(mono, "text-foreground/35 mb-1")}>Result</p>
+              <p className="text-foreground/90 max-h-48 overflow-auto break-words whitespace-pre-wrap">
+                {result}
+              </p>
+            </div>
           </div>
-          <div className="bg-foreground/[0.06] mx-3.5 h-px" />
-          <div className="px-3.5 pt-2 pb-2.5">
-            <p className={cn(mono, "text-foreground/35 mb-1")}>Result</p>
-            <p className="text-foreground/90 max-h-48 overflow-auto break-words whitespace-pre-wrap">
-              {result}
-            </p>
-          </div>
-        </div>
+        )}
       </CollapsibleContent>
     </Collapsible>
   );

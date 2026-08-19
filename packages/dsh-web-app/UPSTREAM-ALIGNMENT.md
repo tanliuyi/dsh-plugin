@@ -7,6 +7,7 @@
 - `/api` unary RPC envelope、`/api/respond`、mux/host 双 downlink 与自动重连。
 - `host.describe`、session list/create/history/prompt/cancel/rename/fork、session attachments。
 - assistant-ui Thread、ThreadList、Composer、Markdown、reasoning、附件、通用 tool fallback。
+- `todo/write` 全表替换 projection（空数组隐藏计划条）、`turn/start` 清空且 `turn/end` 保留、composer 上方可折叠 TodoList 计划条，以及 `todo_write` 专用摘要行（支持并行 `in_progress`）。
 - 多 step turn 的消息折叠：`assistant/message` 和 `tool/result` 不结束 running，只有 `turn/end` 或 host `session-status=false` 结束一轮。
 - tool error 状态、乱序 tool result 的兜底卡片、图片 attachment hydration。
 - queue/jobs/projection 基线、queued message 删除/steer、goal CAS RPC（`goal.*`）。
@@ -35,7 +36,7 @@
 
 - `session.history` 的分页策略、长历史虚拟化、滚动锚定和 trajectory virtualization。
 - composer 几何、tab geometry、sidebar scrollbar gutter、conversation overflow 等布局契约。
-- `HistoryEntry.view` 对应的 bash/diff/search/web/Cordis 专用卡片、code-mode nested call 展示、terminal abort row、todo row。
+- `HistoryEntry.view` 对应的 bash/diff/search/web/Cordis 专用卡片、code-mode nested call 展示、terminal abort row。
 - subagent 活动树、专用侧栏层级、只读/continuable 的视觉呈现。
 - session search 的分页、全文高亮和其他结果列表视觉细节。
 - message feedback 按钮、turn-tail action 排布、produced-file chip 等具体组件形态；只有其背后的 RPC/业务语义需要时才纳入对齐。

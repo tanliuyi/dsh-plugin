@@ -1,7 +1,7 @@
 /** zustand store：会话列表、Workspace 分组、当前会话消息与 mux 流状态。 */
 
 import { create } from 'zustand'
-import { rpc, respond, type AgentPresetEntry, type AgentPresetListResponse, type CommandEntry, type ContextBreakdownProjection, type ContextPressureProjection, type GoalProjection, type JobView, type ModelCatalogModel, type ProjectionBaseline, type ModelCatalogResponse, type PendingInteraction, type PermissionSelect, type QueueMessage, type ServerRequest, type SessionAttachment, type SessionModels, type SessionSummary, type SettingsDescribeResponse, type SkillEntry, type SubagentAddress, type SubagentCatalog, type WorkspaceListResponse, type WorkspaceView } from './api'
+import { rpc, respond, type AgentPresetEntry, type AgentPresetListResponse, type CommandEntry, type ContextBreakdownProjection, type ContextPressureProjection, type GoalProjection, type JobView, type ModelCatalogModel, type ProjectionBaseline, type ModelCatalogResponse, type PendingInteraction, type PermissionSelect, type QueueMessage, type QueueMessagePart, type ServerRequest, type SessionAttachment, type SessionModels, type SessionSummary, type SettingsDescribeResponse, type SkillEntry, type SubagentAddress, type SubagentCatalog, type TodoItem, type WorkspaceListResponse, type WorkspaceView } from './api'
 import { ConversationFold, type DshMessage, type FoldableSessionEvent } from './messages'
 import { KeyedEpochGuard } from './epoch'
 
@@ -27,6 +27,7 @@ export interface SessionView {
   permissions?: PermissionSelect;
   contextUsage?: ContextUsage;
   goal?: GoalProjection | null;
+  todos?: TodoItem[] | null;
   parentSessionId?: string;
   origin?: 'subagent';
   subagentMode?: 'one-shot' | 'continuable';
@@ -55,6 +56,52 @@ function contextUsageOf(
 }
 function workspaceTitleOf(cwd: string): string {
   return cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
+}
+
+function todoProjectionOf(value: unknown): TodoItem[] | null | undefined {
+  if (value === null) return null
+  if (!Array.isArray(value)) return undefined
+  if (!value.every((item) => {
+    if (typeof item !== 'object' || item === null) return false
+    const candidate = item as { content?: unknown; status?: unknown }
+    return typeof candidate.content === 'string'
+      && (candidate.status === 'pending' || candidate.status === 'in_progress' || candidate.status === 'completed')
+  })) return undefined
+  return value.map((item) => {
+    const candidate = item as { content: string; status: TodoItem['status'] }
+    return { content: candidate.content, status: candidate.status }
+  })
+}
+
+function applyTodoEvent(
+  value: TodoItem[] | null | undefined,
+  event: FoldableSessionEvent,
+): { value: TodoItem[] | null | undefined; changed: boolean } {
+  if (event.type === 'turn/start') return { value: null, changed: true }
+  if (event.type !== 'todo/write') return { value, changed: false }
+  const data = (event.data ?? {}) as { todos?: unknown }
+  const next = todoProjectionOf(data.todos)
+  return next === undefined || next === null
+    ? { value, changed: false }
+    : { value: next, changed: true }
+}
+
+/** Fold todo events after an optional projection watermark. */
+export function todosFromEvents(
+  events: readonly FoldableSessionEvent[],
+  initialValue: TodoItem[] | null | undefined = undefined,
+  afterSeq = -1,
+): TodoItem[] | null | undefined {
+  let value = initialValue
+  let determined = initialValue !== undefined
+  for (const event of [...events].sort((left, right) => left.seq - right.seq)) {
+    if (event.seq <= afterSeq) continue
+    const next = applyTodoEvent(value, event)
+    if (!next.changed) continue
+    value = next.value
+    determined = true
+  }
+  return determined ? value : undefined
 }
 
 function sessionTitleOf(session: SessionSummary): string {
@@ -126,6 +173,16 @@ const skillLoads = new Map<string, Promise<void>>()
 const commandEpochs = new KeyedEpochGuard()
 const skillEpochs = new KeyedEpochGuard()
 const liveEventsDuringOpen = new Map<string, FoldableSessionEvent[]>()
+const historyEventsBySession = new Map<string, FoldableSessionEvent[]>()
+
+function mergeSessionEvents(...pages: readonly FoldableSessionEvent[][]): FoldableSessionEvent[] {
+  const bySeq = new Map<number, FoldableSessionEvent>()
+  for (const page of pages) {
+    for (const event of page) bySeq.set(event.seq, event)
+  }
+  return [...bySeq.values()].sort((left, right) => left.seq - right.seq)
+}
+
 /** 每个 session 的状态化 fold（messages + next-step inbox pending/claimed）：
  *  openSession 新建并重放 history、removeSessionState 清理、reopen 重建。 */
 const conversationFolds = new Map<string, ConversationFold>()
@@ -157,6 +214,8 @@ interface DshState {
   modelCatalogLoading: boolean
   currentSessionId: string | null
   goal: GoalProjection | null
+  /** Host projection: undefined before capability data, null after turn/start. */
+  todos: TodoItem[] | null | undefined
   planMode: boolean
   createGoal: (objective: string, maxGoalRounds?: number) => Promise<void>
   editGoal: (objective?: string, maxGoalRounds?: number) => Promise<void>
@@ -191,6 +250,10 @@ interface DshState {
   lastEventSeqBySession: Record<string, number>
   isRunning: boolean
   loadingHistory: boolean
+  loadingMoreHistory: boolean
+  historyHasMore: boolean
+  historyLoadError: string | null
+  loadMoreHistory: () => Promise<void>
   error: string | null
   pendingInteractions: PendingInteraction[]
   boot: (preferredSessionId?: string) => Promise<void>
@@ -252,6 +315,7 @@ export const useDsh = create<DshState>((set, get) => ({
   modelCatalogLoading: false,
   currentSessionId: readCurrentSessionId(),
   goal: null,
+  todos: undefined,
   planMode: false,
   contextUsage: undefined,
   queueItems: [],
@@ -269,6 +333,9 @@ export const useDsh = create<DshState>((set, get) => ({
   lastEventSeqBySession: {},
   isRunning: false,
   loadingHistory: false,
+  loadingMoreHistory: false,
+  historyHasMore: false,
+  historyLoadError: null,
   error: null,
   pendingInteractions: [],
   boot: async (preferredSessionId) => {
@@ -353,6 +420,7 @@ export const useDsh = create<DshState>((set, get) => ({
         permissions: s.projections?.values?.permissions,
         contextUsage: contextUsageOf(s.projections?.values?.contextPressure, s.projections?.values?.contextBreakdown),
         goal: s.projections?.values?.goal ?? null,
+        todos: todoProjectionOf(s.projections?.values?.todos),
         parentSessionId: s.parentSessionId,
         origin: s.origin,
       })),
@@ -366,6 +434,7 @@ export const useDsh = create<DshState>((set, get) => ({
         result.value.items.find((session) => session.sessionId === get().currentSessionId)?.projections?.values?.contextBreakdown,
       ),
       goal: result.value.items.find((session) => session.sessionId === get().currentSessionId)?.projections?.values?.goal ?? null,
+      todos: todoProjectionOf(result.value.items.find((session) => session.sessionId === get().currentSessionId)?.projections?.values?.todos),
     })
   },
 
@@ -404,13 +473,13 @@ export const useDsh = create<DshState>((set, get) => ({
     conversationFolds.set(sessionId, folder)
     saveCurrentSessionId(sessionId)
     const session = get().sessions.find((item) => item.sessionId === sessionId)
-    set({ currentSessionId: sessionId, permissions: session?.permissions ?? null, contextUsage: session?.contextUsage, goal: session?.goal ?? null, messages: [], loadingHistory: true, error: null, isRunning: session?.running ?? false, planMode: false, modelCatalogGroups: [], modelCatalog: [], selectedProvider: null, selectedModel: null, selectedReasoningEffort: undefined, modelRoutable: null, modelCatalogSessionId: null, commands: [], commandsSessionId: null, commandsLoading: session?.origin !== 'subagent', commandLoadError: null, skills: [], skillsSessionId: null, skillsLoading: true })
+    set({ currentSessionId: sessionId, permissions: session?.permissions ?? null, contextUsage: session?.contextUsage, goal: session?.goal ?? null, todos: session?.todos, messages: [], loadingHistory: true, loadingMoreHistory: false, historyHasMore: false, historyLoadError: null, error: null, isRunning: session?.running ?? false, planMode: false, modelCatalogGroups: [], modelCatalog: [], selectedProvider: null, selectedModel: null, selectedReasoningEffort: undefined, modelRoutable: null, modelCatalogSessionId: null, commands: [], commandsSessionId: null, commandsLoading: session?.origin !== 'subagent', commandLoadError: null, skills: [], skillsSessionId: null, skillsLoading: true })
     if (session?.origin !== 'subagent') void get().loadCommands(sessionId).catch(() => {})
     void get().loadSkills(sessionId)
     void get().loadSessionModels(sessionId)
     if (session?.origin === 'subagent' && session.parentSessionId) void get().loadSubagents(session.parentSessionId)
     try {
-      let result: Awaited<ReturnType<typeof rpc<{ events: { event: FoldableSessionEvent }[]; projections?: ProjectionBaseline }>>>
+      let result: Awaited<ReturnType<typeof rpc<{ events: { event: FoldableSessionEvent }[]; projections?: ProjectionBaseline; hasMore?: boolean }>>>
       if (session?.origin === 'subagent' && session.parentSessionId) {
         const catalogResult = await rpc<SubagentCatalog>('subagent.list', { parentSessionId: session.parentSessionId })
         if (generation !== openSessionGeneration || get().currentSessionId !== sessionId) return
@@ -418,14 +487,14 @@ export const useDsh = create<DshState>((set, get) => ({
           ? catalogResult.value.entries.find((item) => item.kind === 'child' && item.id === sessionId)
           : undefined
         const mode = entry?.kind === 'child' ? entry.mode : session.subagentMode ?? 'one-shot'
-        result = await rpc<{ events: { event: FoldableSessionEvent }[]; projections?: ProjectionBaseline }>('subagent.history', {
+        result = await rpc<{ events: { event: FoldableSessionEvent }[]; projections?: ProjectionBaseline; hasMore?: boolean }>('subagent.history', {
           parentSessionId: session.parentSessionId,
           childSessionId: sessionId,
           mode,
           maxMessages: 200,
         })
       } else {
-        result = await rpc<{ events: { event: FoldableSessionEvent }[]; projections?: ProjectionBaseline }>(
+        result = await rpc<{ events: { event: FoldableSessionEvent }[]; projections?: ProjectionBaseline; hasMore?: boolean }>(
           'session.history',
           { sessionId, maxMessages: 200 },
         )
@@ -436,17 +505,28 @@ export const useDsh = create<DshState>((set, get) => ({
       const projectionGoal = values?.goal as GoalProjection | null | undefined
       const projectionPlan = values?.plan as { active?: unknown; pending?: unknown } | undefined
       const baseline = result.value.projections
+      const hasTodoProjection = values !== undefined && Object.prototype.hasOwnProperty.call(values, 'todos')
       if (baseline) {
         const rows = Object.fromEntries(Object.entries(baseline.values).map(([key, value]) => [key, { value, seq: baseline.asOfSeq }]))
         set({ projectionsBySession: { ...get().projectionsBySession, [sessionId]: rows } })
       }
-      if (projectionGoal !== undefined || projectionPlan !== undefined) {
+      if (projectionGoal !== undefined || projectionPlan !== undefined || hasTodoProjection) {
         set({
           ...(projectionGoal !== undefined ? { goal: projectionGoal } : {}),
           ...(projectionPlan !== undefined ? { planMode: projectionPlan.pending === true ? projectionPlan.active !== true : projectionPlan.active === true } : {}),
+          ...(hasTodoProjection ? { todos: todoProjectionOf(values?.todos) ?? null } : {}),
         })
       }
       const historyEvents = result.value.events.map((e) => e.event)
+      historyEventsBySession.set(sessionId, historyEvents)
+      const baselineTodos = hasTodoProjection ? todoProjectionOf(values?.todos) ?? null : undefined
+      const eventTodos = hasTodoProjection
+        ? todosFromEvents(historyEvents, baselineTodos, baseline?.asOfSeq ?? -1)
+        : todosFromEvents(historyEvents)
+      let currentTodos = hasTodoProjection
+        ? eventTodos ?? baselineTodos ?? null
+        : eventTodos === undefined ? session?.todos : eventTodos
+      const todoWatermark = hasTodoProjection ? baseline?.asOfSeq ?? -1 : -1
       // 状态化重放 history（含 agent/inbox/spliced → 重建 pending/claimed）。
       for (const event of historyEvents) folder.fold(event)
       let merged = folder.getMessages()
@@ -456,7 +536,14 @@ export const useDsh = create<DshState>((set, get) => ({
       for (;;) {
         const buffered = liveEventsDuringOpen.get(sessionId) ?? []
         let added = false
+        if (buffered.length > 0) {
+          historyEventsBySession.set(sessionId, mergeSessionEvents(historyEventsBySession.get(sessionId) ?? [], buffered))
+        }
         for (const event of [...buffered].sort((left, right) => left.seq - right.seq)) {
+          if (event.seq > todoWatermark) {
+            const todo = applyTodoEvent(currentTodos, event)
+            if (todo.changed) currentTodos = todo.value
+          }
           if (folder.fold(event) !== null) added = true
         }
         if (buffered.length > 0) liveEventsDuringOpen.set(sessionId, [])
@@ -470,13 +557,65 @@ export const useDsh = create<DshState>((set, get) => ({
       const lastSeq = Math.max(0, folder.lastSeq)
       set({
         messages: merged,
+        todos: currentTodos,
         loadingHistory: false,
+        historyHasMore: result.value.hasMore === true,
+        historyLoadError: null,
         lastEventSeqBySession: { ...get().lastEventSeqBySession, [sessionId]: lastSeq },
       })
     } catch (error) {
       if (generation !== openSessionGeneration || get().currentSessionId !== sessionId) return
       liveEventsDuringOpen.delete(sessionId)
       set({ loadingHistory: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  },
+
+  async loadMoreHistory() {
+    const state = get()
+    const sessionId = state.currentSessionId
+    if (!sessionId || state.loadingHistory || state.loadingMoreHistory || !state.historyHasMore) return
+    const loaded = historyEventsBySession.get(sessionId) ?? []
+    const beforeSeq = loaded[0]?.seq
+    if (beforeSeq === undefined) return
+    const session = state.sessions.find((item) => item.sessionId === sessionId)
+    set({ loadingMoreHistory: true, historyLoadError: null })
+    try {
+      let result: Awaited<ReturnType<typeof rpc<{ events: { event: FoldableSessionEvent }[]; hasMore?: boolean }>>>
+      if (session?.origin === 'subagent' && session.parentSessionId) {
+        result = await rpc('subagent.history', {
+          parentSessionId: session.parentSessionId,
+          childSessionId: sessionId,
+          mode: session.subagentMode ?? 'one-shot',
+          beforeSeq,
+          maxMessages: 100,
+        })
+      } else {
+        result = await rpc('session.history', { sessionId, beforeSeq, maxMessages: 100 })
+      }
+      if (!result.ok) throw new Error(result.error.message)
+      if (get().currentSessionId !== sessionId) return
+      const currentEvents = historyEventsBySession.get(sessionId) ?? []
+      const mergedEvents = mergeSessionEvents(result.value.events.map((item) => item.event), currentEvents)
+      historyEventsBySession.set(sessionId, mergedEvents)
+      const folder = new ConversationFold()
+      for (const event of mergedEvents) folder.fold(event)
+      const messages = await get().hydrateMessageImages(sessionId, folder.getMessages())
+      if (get().currentSessionId !== sessionId) return
+      folder.applyMessages(messages)
+      conversationFolds.set(sessionId, folder)
+      set({
+        messages,
+        loadingMoreHistory: false,
+        historyHasMore: result.value.hasMore === true,
+        historyLoadError: null,
+      })
+    } catch (error) {
+      if (get().currentSessionId === sessionId) {
+        set({
+          loadingMoreHistory: false,
+          historyLoadError: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
   },
 
@@ -869,6 +1008,7 @@ export const useDsh = create<DshState>((set, get) => ({
     delete projectionsBySession[sessionId]
     delete lastEventSeqBySession[sessionId]
     liveEventsDuringOpen.delete(sessionId)
+    historyEventsBySession.delete(sessionId)
     conversationFolds.delete(sessionId)
     set({
       sessions: state.sessions.filter((session) => session.sessionId !== sessionId),
@@ -877,7 +1017,7 @@ export const useDsh = create<DshState>((set, get) => ({
       lastEventSeqBySession,
       pendingInteractions: state.pendingInteractions.filter((item) => item.sessionId !== sessionId),
       ...(state.queueSessionId === sessionId ? { queueSessionId: null, queueItems: [] } : {}),
-      ...(state.currentSessionId === sessionId ? { currentSessionId: null, messages: [], goal: null, contextUsage: undefined, permissions: null, isRunning: false } : {}),
+      ...(state.currentSessionId === sessionId ? { currentSessionId: null, messages: [], goal: null, todos: undefined, contextUsage: undefined, permissions: null, isRunning: false } : {}),
     })
   },
 
@@ -890,6 +1030,9 @@ export const useDsh = create<DshState>((set, get) => ({
     if (sessionId === get().currentSessionId && key === 'plan') {
       const plan = value as { active?: unknown; pending?: unknown } | null
       set({ planMode: plan?.pending === true ? plan.active !== true : plan?.active === true })
+    }
+    if (sessionId === get().currentSessionId && key === 'todos') {
+      set({ todos: todoProjectionOf(value) ?? null })
     }
     set({
       projectionsBySession: {
@@ -911,6 +1054,33 @@ export const useDsh = create<DshState>((set, get) => ({
 
   setQueueSnapshot(sessionId, items) {
     set({ queueSessionId: sessionId, queueItems: items })
+    const withPendingImages = items.filter((item) =>
+      item.parts.some((part) => part.type === 'image' && !part.src),
+    )
+    if (withPendingImages.length === 0) return
+
+    const projected = withPendingImages.map((item, index): DshMessage => ({
+      id: item.id,
+      role: 'user',
+      parts: item.parts,
+      seq: index,
+    }))
+    void get().hydrateMessageImages(sessionId, projected).then((hydrated) => {
+      if (get().queueSessionId !== sessionId) return
+      const sourceById = new Map(withPendingImages.map((item) => [item.id, item]))
+      const hydratedById = new Map(hydrated.map((message) => [message.id, message]))
+      set((state) => ({
+        queueItems: state.queueItems.map((item) => {
+          const source = sourceById.get(item.id)
+          const message = hydratedById.get(item.id)
+          if (!source || !message || source.messageId !== item.messageId) return item
+          const parts = message.parts.filter(
+            (part): part is QueueMessagePart => part.type === 'text' || part.type === 'image',
+          )
+          return { ...item, parts }
+        }),
+      }))
+    }).catch(() => {})
   },
 
   async onCancelQueueItem(itemId) {
@@ -948,6 +1118,8 @@ export const useDsh = create<DshState>((set, get) => ({
     const lastSeq = get().lastEventSeqBySession[sessionId] ?? 0
     if (ev.seq <= lastSeq) return
     set({ lastEventSeqBySession: { ...get().lastEventSeqBySession, [sessionId]: ev.seq } })
+    const todo = applyTodoEvent(get().todos, ev)
+    if (todo.changed) set({ todos: todo.value })
     // openSession 装载中：事件先进 live buffer，装载完成后由 openSession 按 seq
     // 折入同一个 ConversationFold（避免与 history 重放竞争、丢失 steering 依赖的
     // inbox 事件）。
@@ -958,6 +1130,7 @@ export const useDsh = create<DshState>((set, get) => ({
     }
     const folder = conversationFolds.get(sessionId)
     if (!folder) return
+    historyEventsBySession.set(sessionId, mergeSessionEvents(historyEventsBySession.get(sessionId) ?? [], [ev]))
     const folded = folder.fold(ev)
     if (!folded) return
     const patch: Partial<DshState> = { messages: folded.messages }

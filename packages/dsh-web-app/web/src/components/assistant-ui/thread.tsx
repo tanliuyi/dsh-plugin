@@ -10,10 +10,14 @@ import { ChainOfThought } from "@/components/assistant-ui/chain-of-thought";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/follow-up-suggestions";
 import { Image } from "@/components/assistant-ui/image";
 import { GenerationLoader } from "@/components/elements/loading-state";
+import { ErrorState } from "@/components/elements/error-state";
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import { PlanReviewPanel } from "@/components/assistant-ui/plan-review-panel";
+import { TodoPanel } from "@/components/assistant-ui/todo-panel";
+import { VirtualizedThreadMessages } from "@/components/assistant-ui/virtualized-thread-messages";
 import { Reasoning } from "@/components/assistant-ui/reasoning";
 import { AssistantToolCall } from "@/components/assistant-ui/tool-call";
+import { AssistantTodoToolCall } from "@/components/assistant-ui/todo-row";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import {
   Dialog,
@@ -31,6 +35,11 @@ import {
 import { MessageQueue } from "@/components/message-queue";
 import { ComposerTriggerPopover } from "@/components/composer-trigger-popover";
 import { ComposerContext } from "@/components/composer";
+import {
+  STOP_ARM_WINDOW_MS,
+  advanceEsc,
+  primaryActionOf,
+} from "@/components/composer-stop";
 import { ModelSelector } from "@/components/model-selector";
 import { Select, type SelectOption } from "@/components/select";
 import { useDsh } from "@/dsh/store";
@@ -75,7 +84,6 @@ import {
 import {
   ArrowDownIcon,
   ArrowUpIcon,
-  ArrowUpRightIcon,
   CheckIcon,
   CopyIcon,
   DownloadIcon,
@@ -85,7 +93,6 @@ import {
   PauseIcon,
   PencilIcon,
   PlayIcon,
-  RefreshCwIcon,
   SquareIcon,
   TargetIcon,
   TerminalIcon,
@@ -94,6 +101,7 @@ import {
 } from "lucide-react";
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -103,7 +111,9 @@ import {
   type ClipboardEvent,
   type ComponentType,
   type FC,
+  type KeyboardEvent,
   type PropsWithChildren,
+  type ReactNode,
 } from "react";
 
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
@@ -153,20 +163,21 @@ const isNewChatView = (s: AssistantState) =>
   s.thread.messages.length === 0 &&
   (!s.thread.isLoading || s.threads.isLoading);
 
+const ThreadLoading: FC = () => (
+  <div
+    data-slot="aui_thread-loading"
+    className="text-muted-foreground flex h-full min-h-0 w-full flex-1 items-center justify-center gap-2 text-sm"
+    role="status"
+  >
+    <LoaderCircleIcon className="size-4 animate-spin" aria-hidden="true" />
+    <span>Loading conversation...</span>
+  </div>
+);
+
 export const Thread: FC<ThreadProps> = ({ components = EMPTY_COMPONENTS }) => {
   const booting = useDsh((s) => s.booting);
 
-  if (booting) {
-    return (
-      <div
-        data-slot="aui_thread-loading"
-        className="text-muted-foreground flex min-h-0 flex-1 items-center justify-center gap-2 text-sm"
-      >
-        <LoaderCircleIcon className="size-4 animate-spin" aria-hidden="true" />
-        <span>Loading conversation...</span>
-      </div>
-    );
-  }
+  if (booting) return <ThreadLoading />;
 
   return <ThreadRoot components={components} />;
 };
@@ -180,8 +191,14 @@ export const ThreadRoot: FC<ThreadRootProps> = ({
   const currentSessionId = useDsh((s) => s.currentSessionId);
   const loadingHistory = useDsh((s) => s.loadingHistory);
   // An empty message buffer is an intermediate hydration state, not a new chat.
-  const sessionReady = sessionId === undefined || currentSessionId === sessionId;
-  const isEmpty = useAuiState(isNewChatView) && sessionReady && hydrated && !loadingHistory;
+  const sessionReady =
+    sessionId === undefined || currentSessionId === sessionId;
+  const isHydrating =
+    sessionId !== undefined && (!sessionReady || !hydrated || loadingHistory);
+  const isEmpty =
+    useAuiState(isNewChatView) && sessionReady && hydrated && !loadingHistory;
+
+  if (isHydrating) return <ThreadLoading />;
 
   return (
     <ThreadComponentsContext.Provider value={components}>
@@ -270,7 +287,8 @@ const useInitialInstantBottom = () => {
 const ThreadRootContent: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
   const viewportRef = useInitialInstantBottom();
-  const showNewChat = (state: AssistantState) => isEmpty && isNewChatView(state);
+  const showNewChat = (state: AssistantState) =>
+    isEmpty && isNewChatView(state);
 
   return (
     <ThreadPrimitive.Root
@@ -301,27 +319,34 @@ const ThreadRootContent: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
             <Welcome />
           </AuiIf>
 
-          <div
-            data-slot="aui_message-group"
-            className="mb-14 flex flex-col gap-y-6 empty:hidden"
-          >
-            <ThreadPrimitive.Messages>
-              {() => <ThreadMessage />}
-            </ThreadPrimitive.Messages>
-          </div>
+          {!isEmpty && (
+            <div data-slot="aui_message-group" className="mb-14">
+              <VirtualizedThreadMessages
+                viewportRef={viewportRef}
+                messageComponent={ThreadMessage}
+              />
+            </div>
+          )}
 
           <ThreadPrimitive.ViewportFooter
             className={cn(
-              "aui-thread-viewport-footer bg-background flex flex-col gap-1 overflow-visible pb-4 md:pb-6",
+              "aui-thread-viewport-footer bg-background flex flex-col items-start justify-start gap-1 w-full overflow-visible pb-4 md:pb-6",
               !isEmpty &&
                 "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
           >
             <ThreadScrollToBottom />
+
             <ThreadFollowupSuggestions />
+
+            <TodoPanel />
+
             <PendingInteractionCards />
+
             <GoalBar />
+
             <QueueDock />
+
             <Composer />
             <AuiIf condition={showNewChat}>
               <div
@@ -346,9 +371,8 @@ const ThreadMessage: FC = () => {
   const messageId = useAuiState((s) => s.message.id);
   const role = useAuiState((s) => s.message.role);
   const isEditing = useAuiState((s) => s.message.composer.isEditing);
-  // Steering 是注入活跃 turn 的用户输入：不渲染为普通 user 气泡，也不伪装成
-  // assistant 正文。converter 已把 role 映射成 assistant + dsh-steering data part；
-  // 这里按 store 原数据（role==='steering'）拦截，渲染紧凑独立 steering 行。
+  // Steering 是注入活跃 turn 的用户输入：converter 虽映射成 assistant，
+  // 这里仍按 store 原数据（role==='steering'）拦截，复用上游 user-style 气泡。
   const steering = useDsh((s) =>
     messageId
       ? s.messages.find((m) => m.id === messageId && m.role === "steering")
@@ -356,60 +380,216 @@ const ThreadMessage: FC = () => {
   );
 
   if (isEditing) return <EditComposer />;
-  if (steering) return <SteeringRow message={steering} />;
+  if (steering) return <UserMessage steering={steering} />;
   if (role === "user") return <UserMessage />;
   return <AssistantMessageComponent />;
 };
 
-/**
- * SteeringRow: 活跃 turn 中注入的用户输入（上游 SteeringMessageNode）。
- * 文字完整可见、可换行；附带图片按原样渲染（至少不丢文字）。
- */
-const SteeringRow: FC<{ message: DshMessage }> = ({ message }) => {
-  const text = message.parts
-    .filter(
-      (part): part is Extract<DshMessagePart, { type: "steering" }> =>
-        part.type === "steering",
-    )
-    .map((part) => part.text)
-    .join("\n");
-  const images = message.parts.filter(
-    (part): part is DshMessagePart & { type: "image"; src?: string } =>
-      part.type === "image",
+const formatUserMessageTime = (time?: number): string | undefined => {
+  if (time === undefined) return undefined;
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(time));
+};
+
+const epochTimeOf = (value: unknown): number | undefined => {
+  if (value instanceof Date) return value.getTime();
+  return typeof value === "number" ? value : undefined;
+};
+
+type SteeringImage = Extract<DshMessagePart, { type: "image" }>;
+type LoadedSteeringImage = SteeringImage & { src: string };
+
+type UserMessageActionsProps = {
+  text: string;
+  createdAt?: number;
+};
+
+/** Copy/time chrome shared by ordinary user and steering messages. */
+const UserMessageActions: FC<UserMessageActionsProps> = ({
+  text,
+  createdAt,
+}) => {
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
+  const timestamp = formatUserMessageTime(createdAt);
+  // Match the assistant action-bar visibility while keeping this slot mounted.
+  const hideActions = useAuiState(
+    (s) => s.thread.isRunning || (!s.message.isLast && !s.message.isHovering),
   );
+
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    },
+    [],
+  );
+
+  const copy = useCallback(async () => {
+    if (text === "" || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      return;
+    }
+    setCopied(true);
+    if (copyTimerRef.current !== null) {
+      window.clearTimeout(copyTimerRef.current);
+    }
+    copyTimerRef.current = window.setTimeout(() => {
+      copyTimerRef.current = null;
+      setCopied(false);
+    }, 1_000);
+  }, [text]);
+
+  if (timestamp === undefined && text === "") return null;
+
   return (
     <div
-      data-slot="aui_steering-row"
-      data-role="steering"
-      className="fade-in slide-in-from-bottom-1 animate-in border-border/50 bg-muted/20 my-1 flex flex-col gap-1.5 rounded-md border-l-2 border-dashed px-3 py-2 duration-150"
-    >
-      <div className="flex items-center gap-1.5">
-        <ArrowUpRightIcon
-          aria-hidden
-          className="text-muted-foreground size-3.5 shrink-0"
-        />
-        <span className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
-          Steering
-        </span>
-      </div>
-      {text !== "" && (
-        <p className="text-foreground text-sm leading-relaxed break-words whitespace-pre-wrap">
-          {text}
-        </p>
+      data-slot="aui_user-message-actions"
+      aria-hidden={hideActions || undefined}
+      className={cn(
+        "flex h-7 items-center gap-2 text-muted-foreground",
+        hideActions && "invisible pointer-events-none",
       )}
-      {images.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {images.map((image) => (
-            <img
-              key={image.attachmentId}
-              src={image.src ?? ""}
-              alt={image.name ?? "steering attachment"}
-              className="border-border/60 max-h-36 rounded-lg border object-contain"
-            />
-          ))}
-        </div>
+    >
+      {timestamp !== undefined && (
+        <span className="text-sm leading-6 opacity-0 transition-opacity group-hover/user-message:opacity-100 group-focus-within/user-message:opacity-100">
+          {timestamp}
+        </span>
+      )}
+      {text !== "" && (
+        <TooltipIconButton
+          tooltip={copied ? "Copied" : "Copy"}
+          aria-label={copied ? "Copied" : "Copy"}
+          onClick={() => void copy()}
+          className="size-7"
+        >
+          {copied ? (
+            <CheckIcon className="size-4" />
+          ) : (
+            <CopyIcon className="size-4" />
+          )}
+        </TooltipIconButton>
       )}
     </div>
+  );
+};
+
+type UserMessageSurfaceProps = {
+  text: string;
+  media?: ReactNode;
+  body?: ReactNode;
+  createdAt?: number;
+  kind?: "user" | "steering";
+  pending?: boolean;
+};
+
+/** One user-message surface used by normal user and steering messages. */
+const UserMessageSurface: FC<UserMessageSurfaceProps> = ({
+  text,
+  media,
+  body,
+  createdAt,
+  kind = "user",
+  pending = false,
+}) => (
+  <div
+    data-slot="aui_user-message-surface"
+    data-role={kind}
+    data-pending-steering={pending || undefined}
+    data-time-hover-root
+    className="group/user-message fade-in slide-in-from-bottom-1 animate-in flex w-full flex-col items-end gap-1.5 px-2 mt-3 duration-150"
+  >
+    <div className="flex min-w-0 max-w-[min(525px,82%)] flex-col items-end gap-2">
+      {media}
+      {body !== undefined ? (
+        <div
+          data-slot="aui_user-message-content"
+          className="aui-user-message-content bg-muted text-foreground rounded-[22px] px-4 py-2 wrap-break-word empty:hidden"
+        >
+          {body}
+        </div>
+      ) : text !== "" ? (
+        <div
+          data-slot="aui_user-message-content"
+          className="aui-user-message-content bg-muted text-foreground rounded-[22px] px-4 py-2 text-base leading-6 wrap-break-word whitespace-pre-wrap"
+        >
+          {text}
+        </div>
+      ) : null}
+    </div>
+    <UserMessageActions text={text} createdAt={createdAt} />
+  </div>
+);
+
+const SteeringImageList: FC<{ images: readonly SteeringImage[] }> = ({
+  images,
+}) => {
+  const visibleImages = images.filter(
+    (image): image is LoadedSteeringImage =>
+      typeof image.src === "string" && image.src !== "",
+  );
+  if (visibleImages.length === 0) return null;
+  return (
+    <div className="flex flex-wrap justify-end gap-2">
+      {visibleImages.map((image) => (
+        <img
+          key={image.attachmentId}
+          src={image.src}
+          alt={image.name ?? "Image attachment"}
+          className="border-border/60 max-h-36 max-w-full rounded-[22px] border object-contain"
+        />
+      ))}
+    </div>
+  );
+};
+
+/**
+ * Host-authoritative steering projection shown before the durable user/message
+ * event arrives. The message-id handoff prevents a transient/durable duplicate.
+ */
+const PendingSteeringRows: FC = () => {
+  const currentSessionId = useDsh((state) => state.currentSessionId);
+  const queueSessionId = useDsh((state) => state.queueSessionId);
+  const queueItems = useDsh((state) => state.queueItems);
+  const messages = useDsh((state) => state.messages);
+
+  if (currentSessionId === null || queueSessionId !== currentSessionId) {
+    return null;
+  }
+
+  const pending = queueItems.filter(
+    (item) =>
+      item.placement === "steering" &&
+      (item.messageId === undefined ||
+        !messages.some((message) => message.id === item.messageId)),
+  );
+  if (pending.length === 0) return null;
+
+  return (
+    <>
+      {pending.map((item) => (
+        <UserMessageSurface
+          key={`pending-steering-${item.id}`}
+          text={item.parts
+            .flatMap((part) => part.type === "text" ? [part.text] : [])
+            .join("")}
+          media={(
+            <SteeringImageList
+              images={item.parts.filter(
+                (part): part is SteeringImage => part.type === "image",
+              )}
+            />
+          )}
+          kind="steering"
+          pending
+        />
+      ))}
+    </>
   );
 };
 
@@ -983,7 +1163,108 @@ const Composer: FC = () => {
   );
   const aui = useAui();
   const slash = useSlashCommands();
-  
+
+  // 双 Esc 停止：第一次 Esc 只布防（按钮临时变成 "Esc" 提示）并开启 1 秒窗口；
+  // 窗口内第二次 Esc 才真正停止。armed 状态放在 Root 之上，capture 键盘处理和
+  // 右侧按钮都能读写它。ref 与 state 同步，handler 里读 ref 避免闭包过期。
+  const [escArmed, setEscArmed] = useState(false);
+  const escArmedRef = useRef(false);
+  const disarmTimerRef = useRef<number | null>(null);
+
+  const disarmEsc = useCallback(() => {
+    escArmedRef.current = false;
+    setEscArmed(false);
+    if (disarmTimerRef.current !== null) {
+      window.clearTimeout(disarmTimerRef.current);
+      disarmTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleEscDisarm = useCallback(() => {
+    if (disarmTimerRef.current !== null)
+      window.clearTimeout(disarmTimerRef.current);
+    disarmTimerRef.current = window.setTimeout(() => {
+      disarmTimerRef.current = null;
+      disarmEsc();
+    }, STOP_ARM_WINDOW_MS);
+  }, [disarmEsc]);
+
+  // 运行中状态变化：turn 若在窗口期内自然结束（停止/取消/完成），立即解除布防，
+  // 避免下一次运行被残留的第二次 Esc 误停；卸载时清理定时器。
+  const running = useAuiState((s) => s.thread.isRunning);
+  const composerEmpty = useAuiState((s) => s.composer.isEmpty);
+  useEffect(() => {
+    if (!running) disarmEsc();
+  }, [running, disarmEsc]);
+  useEffect(() => disarmEsc, [disarmEsc]);
+
+  const sendSteer = () => {
+    // 复用现有 Send 漏斗（附件上传 / 清空 / 失败草稿恢复与 idle 完全一致）：
+    // 运行中 DshRuntime.onNew 依据 isRunning 把本次提交落成 mode:'steer'。
+    // send() 返回 void：派发失败由 composer 核心内部恢复草稿（_restoreUnsentDraft），
+    // 这里既不能也无须 .catch。
+    aui.composer.send();
+  };
+
+  const stopRunning = () => {
+    aui.composer.cancel();
+    disarmEsc();
+  };
+
+  const handleKeyDownCapture = (event: KeyboardEvent<HTMLFormElement>) => {
+    const target = event.target;
+    if (
+      !(target instanceof HTMLElement) ||
+      !event.currentTarget.contains(target)
+    )
+      return;
+    if (event.nativeEvent.isComposing) return;
+
+    if (event.key === "Enter") {
+      // running 且输入非空时，Enter 直接注入 steer 引导消息（原本会换行）。
+      // 修饰键组合保持原语义：Shift+Enter 换行、Cmd/Ctrl+Enter 等交给编辑器；
+      // 焦点在按钮上时不劫持（保留按钮原生 Enter=点击）。
+      if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey)
+        return;
+      if (target.closest("button")) return;
+      if (!running || composerEmpty) return;
+      // 斜杠指令 / 提及浮层打开时，回车用于选中高亮项（Unstable_TriggerPopover
+      // 在 data-state="open" 时渲染带 [data-slot="composer-trigger-popover"] 的
+      // 容器）；此刻不劫持，避免破坏命令选择后再回车发送。
+      if (
+        event.currentTarget.querySelector(
+          '[data-slot="composer-trigger-popover"][data-state="open"]',
+        )
+      )
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      sendSteer();
+      return;
+    }
+
+    if (event.key === "Escape") {
+      // 单次 Esc 绝不误停：只布防；1 秒窗口内第二次 Esc 才停止。运行结束自动解除。
+      if (!running) {
+        disarmEsc();
+        return;
+      }
+      // 必须先吞掉这一次 Esc：Lexical 输入默认 cancelOnEscape，running 时
+      // 单次 Esc 会立即 composer.cancel()（capabilities.cancel 恒为 true），
+      // 若放行则双 Esc 的第一次就误停，布防窗口形同虚设。
+      event.preventDefault();
+      event.stopPropagation();
+      const transition = advanceEsc(escArmedRef.current, true);
+      escArmedRef.current = transition.armed;
+      setEscArmed(transition.armed);
+      if (transition.stop) {
+        stopRunning();
+      } else {
+        scheduleEscDisarm();
+      }
+    }
+  };
+
   const handlePaste = async (event: ClipboardEvent<HTMLDivElement>) => {
     const files = Array.from(event.clipboardData.files);
     if (!aui.thread.getState().capabilities.attachments || files.length === 0)
@@ -1007,6 +1288,7 @@ const Composer: FC = () => {
           "aui-composer-root relative flex w-full flex-col",
           hasPendingInteraction && "hidden",
         )}
+        onKeyDownCapture={handleKeyDownCapture}
       >
         <ComposerPrimitive.AttachmentDropzone asChild>
           <div
@@ -1024,7 +1306,11 @@ const Composer: FC = () => {
               onPaste={handlePaste}
               children={<SlashCommandPlaceholderPlugin />}
             />
-            <ComposerAction />
+            <ComposerAction
+              armed={escArmed}
+              onSteer={sendSteer}
+              onCancel={stopRunning}
+            />
           </div>
         </ComposerPrimitive.AttachmentDropzone>
         <ComposerTriggerPopover
@@ -1062,7 +1348,9 @@ const useSlashCommands = () => {
     // 调用本身是一次普通 session.prompt，宿主导出预置注入 <skill_content>；
     // 这里仅让它们出现在斜杠菜单里（指令插入模式会填入 `/name`）。
     // 与 host command 同名的 skill 被过滤：command 优先，避免菜单出现两行同名项。
-    const commandNames = new Set(dynamicCommands.map((command) => command.name));
+    const commandNames = new Set(
+      dynamicCommands.map((command) => command.name),
+    );
     const skillItems = (skillsSessionId === currentSessionId ? skills : [])
       .filter((skill) => !commandNames.has(skill.name))
       .map((skill) => ({
@@ -1476,35 +1764,22 @@ const ComposerContextAction: FC = () => {
   return <ComposerContext usage={usage} />;
 };
 
-const PlanModeAction: FC = () => {
-  const active = useDsh((s) => s.planMode);
-  const executeCommand = useDsh((s) => s.executeCommand);
-  return (
-    <button
-      type="button"
-      className={cn(
-        "h-7 rounded-full border px-2.5 text-xs transition-colors",
-        active
-          ? "border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-          : "text-muted-foreground hover:bg-muted",
-      )}
-      aria-pressed={active}
-      title={active ? "Disable plan mode" : "Enable plan mode"}
-      onClick={() => void executeCommand(active ? "/plan off" : "/plan")}
-    >
-      Plan
-    </button>
-  );
-};
 
-const ComposerAction: FC = () => {
+const ComposerAction: FC<{
+  armed: boolean;
+  onSteer: () => void;
+  onCancel: () => void;
+}> = ({ armed, onSteer, onCancel }) => {
   const modelRoutable = useDsh((s) => s.modelRoutable);
+  const running = useAuiState((s) => s.thread.isRunning);
+  const isEmpty = useAuiState((s) => s.composer.isEmpty);
+  const primary = primaryActionOf({ running, isEmpty, armed });
+
   return (
     <div className="aui-composer-action-wrapper relative flex items-center justify-between">
       <div className="flex items-center gap-1.5">
         <ComposerAddAttachment />
         <PermissionSelectorAction />
-        <PlanModeAction />
       </div>
       <div className="flex items-center gap-1.5">
         <ModelSelectorAction />
@@ -1541,7 +1816,7 @@ const ComposerAction: FC = () => {
             </ComposerPrimitive.StopDictation>
           </AuiIf>
         </AuiIf>
-        <AuiIf condition={(s) => !s.thread.isRunning}>
+        {primary === "send" && (
           <ComposerPrimitive.Send asChild>
             <TooltipIconButton
               disabled={modelRoutable === false}
@@ -1556,20 +1831,48 @@ const ComposerAction: FC = () => {
               <ArrowUpIcon className="aui-composer-send-icon size-4.5" />
             </TooltipIconButton>
           </ComposerPrimitive.Send>
-        </AuiIf>
-        <AuiIf condition={(s) => s.thread.isRunning}>
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-cancel size-7 rounded-full"
-              aria-label="Stop generating"
-            >
+        )}
+        {primary === "steer" && (
+          <Button
+            type="button"
+            variant="default"
+            size="icon"
+            className="aui-composer-steer size-7 rounded-full"
+            aria-label="Send steering message"
+            title="Send steering message (Enter)"
+            onClick={onSteer}
+          >
+            <ArrowUpIcon className="aui-composer-steer-icon size-4.5" />
+          </Button>
+        )}
+        {(primary === "stop" || primary === "esc") && (
+          <Button
+            type="button"
+            variant="default"
+            size="icon"
+            className={cn(
+              "size-7 rounded-full",
+              primary === "esc" ? "aui-composer-esc" : "aui-composer-cancel",
+            )}
+            aria-label={
+              primary === "esc" ? "Press Esc again to stop" : "Stop generating"
+            }
+            title={
+              primary === "esc"
+                ? "Press Esc again within 1s to stop"
+                : "Stop generating"
+            }
+            onClick={onCancel}
+          >
+            {primary === "esc" ? (
+              <span className="text-[10px] font-semibold tracking-wide">
+                Esc
+              </span>
+            ) : (
               <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
-            </Button>
-          </ComposerPrimitive.Cancel>
-        </AuiIf>
+            )}
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -1585,6 +1888,13 @@ const MessageError: FC = () => {
   );
 };
 
+const PendingSteeringBeforeLoader: FC = () => {
+  const messageId = useAuiState((s) => s.message.id);
+  const lastMessageId = useAuiState((s) => s.thread.messages.at(-1)?.id);
+  if (messageId !== lastMessageId) return null;
+  return <PendingSteeringRows />;
+};
+
 const ThreadGenerationLoader: FC = () => {
   const [tick, setTick] = useState(0);
 
@@ -1596,22 +1906,28 @@ const ThreadGenerationLoader: FC = () => {
   }, []);
 
   return (
-    <GenerationLoader
-      label="Generating"
-      tick={tick}
-      role="status"
-      aria-label="Assistant is working"
-      className="aui-assistant-message-indicator items-start"
-    />
+    <>
+      <PendingSteeringBeforeLoader />
+      <GenerationLoader
+        label="Generating"
+        tick={tick}
+        role="status"
+        aria-label="Assistant is working"
+        className="aui-assistant-message-indicator items-start mt-4"
+      />
+    </>
   );
 };
 
 const AssistantMessage: FC = () => {
-  const {
-    ToolFallback: ToolFallbackComponent = AssistantToolCall,
-    ToolGroup,
-  } = useContext(ThreadComponentsContext);
+  const { ToolFallback: ToolFallbackComponent = AssistantToolCall, ToolGroup } =
+    useContext(ThreadComponentsContext);
 
+  const hasSteeringData = useAuiState((s) =>
+    s.message.content.some(
+      (part) => part.type === "data" && part.name === "dsh-steering",
+    ),
+  );
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
   const ACTION_BAR_HEIGHT = `min-h-7.5 ${ACTION_BAR_PT}`;
@@ -1654,29 +1970,37 @@ const AssistantMessage: FC = () => {
               case "reasoning":
                 return <Reasoning {...part} />;
               case "tool-call":
-                return part.toolUI ?? <ToolFallbackComponent {...part} />;
+                if (part.toolUI) return part.toolUI;
+                if (part.toolName === "todo_write") {
+                  return <AssistantTodoToolCall {...part} />;
+                }
+                return <ToolFallbackComponent {...part} />;
               case "data":
                 if (part.name === "dsh-command") {
                   const command =
-                    (part as {
-                      data?: {
-                        commandName?: string | null;
-                        outcome?: {
-                          kind?: "success" | "error";
-                          text?: string;
-                        } | null;
-                      };
-                    }).data ?? {};
+                    (
+                      part as {
+                        data?: {
+                          commandName?: string | null;
+                          outcome?: {
+                            kind?: "success" | "error";
+                            text?: string;
+                          } | null;
+                        };
+                      }
+                    ).data ?? {};
                   const running = command.outcome == null;
                   const failed = command.outcome?.kind === "error";
                   const summary = running
                     ? "Running command"
-                    : command.outcome?.text ??
-                      (failed ? "Command failed" : "Command completed");
+                    : (command.outcome?.text ??
+                      (failed ? "Command failed" : "Command completed"));
                   return (
                     <div
                       data-slot="aui_command"
-                      data-state={running ? "running" : failed ? "error" : "complete"}
+                      data-state={
+                        running ? "running" : failed ? "error" : "complete"
+                      }
                       className="border-border/50 bg-muted/25 my-1 flex min-h-8 items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs"
                       role="status"
                     >
@@ -1686,7 +2010,9 @@ const AssistantMessage: FC = () => {
                         <TerminalIcon
                           className={cn(
                             "size-3.5 shrink-0",
-                            failed ? "text-destructive" : "text-muted-foreground",
+                            failed
+                              ? "text-destructive"
+                              : "text-muted-foreground",
                           )}
                         />
                       )}
@@ -1703,6 +2029,26 @@ const AssistantMessage: FC = () => {
                         {summary}
                       </span>
                     </div>
+                  );
+                }
+                if (part.name === "dsh-generation-status") {
+                  const status =
+                    (
+                      part as {
+                        data?: {
+                          state?: "error" | "retrying";
+                          title?: string;
+                          detail?: string;
+                        };
+                      }
+                    ).data ?? {};
+                  return (
+                    <ErrorState
+                      title={status.title ?? "Request failed"}
+                      detail={status.detail ?? "The model request failed."}
+                      retrying={status.state === "retrying"}
+                      className="my-1"
+                    />
                   );
                 }
                 // dsh 上下文注入（runtime context / skill 目录等）：模型可见、用户弱化，
@@ -1726,24 +2072,21 @@ const AssistantMessage: FC = () => {
                     </div>
                   );
                 }
-                // 兜底：未走到 ThreadMessage 拦截路径时（如 id 查找失败），也把
-                // steering 渲染成独立紧凑行，绝不落成普通 user / assistant 正文。
+                // 兜底：未走到 ThreadMessage 拦截路径时仍复用同一用户气泡，避免
+                // durable steering 在不同 assistant-ui renderer 中出现两套外观。
                 if (part.name === "dsh-steering") {
-                  const steering = (part as { data?: { text?: string } }).data ?? {};
+                  const steering =
+                    (part as {
+                      data?: { text?: string; images?: SteeringImage[] };
+                    }).data ?? {};
                   return (
-                    <div
-                      data-slot="aui_steering-row"
-                      data-role="steering"
-                      className="border-border/50 bg-muted/20 my-1 flex items-start gap-2 rounded-md border-l-2 border-dashed px-2.5 py-1.5 text-xs"
-                    >
-                      <span className="text-muted-foreground flex shrink-0 items-center gap-1 font-medium">
-                        <ArrowUpRightIcon className="size-3" />
-                        Steering
-                      </span>
-                      <span className="text-foreground min-w-0 flex-1 leading-relaxed break-words whitespace-pre-wrap">
-                        {steering.text ?? ""}
-                      </span>
-                    </div>
+                    <UserMessageSurface
+                      text={steering.text ?? ""}
+                      media={(
+                        <SteeringImageList images={steering.images ?? []} />
+                      )}
+                      kind="steering"
+                    />
                   );
                 }
                 return part.dataRendererUI;
@@ -1754,15 +2097,17 @@ const AssistantMessage: FC = () => {
                   </div>
                 );
               case "image":
+                // A steering fallback owns its image gallery inside the shared
+                // user-message surface; do not leak image parts into the
+                // assistant column as a second visual message.
+                if (hasSteeringData) return null;
                 return (
                   <div data-slot="aui_assistant-message-image" className="py-1">
                     <Image {...part} />
                   </div>
                 );
               case "indicator":
-                return (
-                  <ThreadGenerationLoader />
-                );
+                return <ThreadGenerationLoader />;
               default:
                 return null;
             }
@@ -1771,12 +2116,14 @@ const AssistantMessage: FC = () => {
         <MessageError />
       </div>
 
-      <div
-        data-slot="aui_assistant-message-footer"
-        className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
-      >
-        <AssistantActionBar />
-      </div>
+      {!hasSteeringData && (
+        <div
+          data-slot="aui_assistant-message-footer"
+          className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
+        >
+          <AssistantActionBar />
+        </div>
+      )}
     </MessagePrimitive.Root>
   );
 };
@@ -1798,11 +2145,6 @@ const AssistantActionBar: FC = () => {
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
-      <ActionBarPrimitive.Reload asChild>
-        <TooltipIconButton tooltip="Refresh">
-          <RefreshCwIcon />
-        </TooltipIconButton>
-      </ActionBarPrimitive.Reload>
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
           <TooltipIconButton
@@ -1816,7 +2158,7 @@ const AssistantActionBar: FC = () => {
           side="bottom"
           align="start"
           sideOffset={6}
-          className="aui-action-bar-more-content bg-popover/95 text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-xl border p-1.5 shadow-lg backdrop-blur-sm"
+          className="aui-action-bar-more-content bg-popover/95 text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-xl border border-border p-1.5 shadow-lg backdrop-blur-sm"
         >
           <ActionBarPrimitive.ExportMarkdown asChild>
             <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">
@@ -1849,7 +2191,7 @@ const UserMessageImages: FC = () => {
   return (
     <div
       data-slot="aui_user-message-images"
-      className="aui-user-message-images col-start-2 flex flex-wrap justify-end gap-2"
+      className="aui-user-message-images flex flex-wrap justify-end gap-2"
     >
       {images.map((part, index) => (
         <UserImagePart
@@ -1862,23 +2204,61 @@ const UserMessageImages: FC = () => {
   );
 };
 
-const UserMessage: FC = () => {
+const UserMessage: FC<{ steering?: DshMessage }> = ({ steering }) => {
+  const content = useAuiState((s) => s.message.content);
+  const createdAt = useAuiState((s) => s.message.createdAt);
+
+  if (steering) {
+    const text = steering.parts
+      .filter(
+        (part): part is Extract<DshMessagePart, { type: "steering" }> =>
+          part.type === "steering",
+      )
+      .map((part) => part.text)
+      .join("");
+    const images = steering.parts.filter(
+      (part): part is SteeringImage => part.type === "image",
+    );
+    return (
+      <MessagePrimitive.Root
+        data-slot="aui_user-message-root"
+        data-role="steering"
+        className="fade-in slide-in-from-bottom-1 animate-in w-full duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      >
+        <UserMessageSurface
+          text={text}
+          media={<SteeringImageList images={images} />}
+          createdAt={steering.createdAt}
+          kind="steering"
+        />
+      </MessagePrimitive.Root>
+    );
+  }
+
+  const text = content
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .join("");
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
-      className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
       data-role="user"
+      className="fade-in slide-in-from-bottom-1 animate-in w-full duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
     >
-      <UserMessageImages />
-      <UserMessageAttachments />
-
-      <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
-        <div className="aui-user-message-content peer bg-muted text-foreground rounded-xl px-4 py-2 wrap-break-word empty:hidden">
+      <UserMessageSurface
+        text={text}
+        media={
+          <>
+            <UserMessageImages />
+            <UserMessageAttachments />
+          </>
+        }
+        body={
           <MessagePrimitive.Parts
             components={{ File: UserFilePart, Image: () => null }}
           />
-        </div>
-      </div>
+        }
+        createdAt={epochTimeOf(createdAt)}
+      />
     </MessagePrimitive.Root>
   );
 };

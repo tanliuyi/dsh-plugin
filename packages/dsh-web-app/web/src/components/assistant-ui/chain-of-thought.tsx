@@ -22,6 +22,7 @@ import {
   type PropsWithChildren,
 } from "react";
 import { cn } from "@/lib/utils";
+import { followResizingContentToBottom } from "@/lib/follow-resizing-content-to-bottom";
 import { ReasoningFade } from "@/components/assistant-ui/reasoning";
 
 const ANIMATION_DURATION = 200;
@@ -166,43 +167,11 @@ function ChainOfThoughtInner({ indices, children }: ChainOfThoughtProps) {
     const scrollEl = scrollRef.current;
     const contentEl = contentRef.current;
     if (!scrollEl || !contentEl) return;
-
-    let pinned = true;
-    let lastScrollTop = scrollEl.scrollTop;
-    let lastScrollHeight = scrollEl.scrollHeight;
-    const isAtBottom = () =>
-      Math.abs(
-        scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight,
-      ) <= 1 || scrollEl.scrollHeight <= scrollEl.clientHeight;
-
-    const pin = () => {
-      if (!pinned) return;
-      scrollEl.scrollTop = scrollEl.scrollHeight;
-    };
-    // A pin's own scroll event can arrive after new content grew the scroll
-    // height and read as "not at bottom"; only an upward move at unchanged
-    // scroll height is user intent.
-    const onScroll = () => {
-      if (isAtBottom()) {
-        pinned = true;
-      } else if (
-        scrollEl.scrollTop < lastScrollTop &&
-        scrollEl.scrollHeight === lastScrollHeight
-      ) {
-        pinned = false;
-      }
-      lastScrollTop = scrollEl.scrollTop;
-      lastScrollHeight = scrollEl.scrollHeight;
-    };
-
-    pin();
-    scrollEl.addEventListener("scroll", onScroll);
-    const observer = new ResizeObserver(pin);
-    observer.observe(contentEl);
-    return () => {
-      scrollEl.removeEventListener("scroll", onScroll);
-      observer.disconnect();
-    };
+    // 写入合并到 rAF：一帧最多一次 `scrollTop = scrollHeight`，避免折叠
+    // 动画/流式增长期间多路同步写入互相竞争造成布局抖动与页面闪烁。
+    return followResizingContentToBottom(scrollEl, contentEl, {
+      respectUserScroll: true,
+    });
   }, [isPreview]);
 
   return (
@@ -268,16 +237,16 @@ function ChainOfThoughtInner({ indices, children }: ChainOfThoughtProps) {
             ref={scrollRef}
             data-slot="aui_chain-of-thought-scroll"
             className={cn(
-              "border-border/50 relative z-0 max-h-64 overflow-y-auto border-t px-2 pt-1.5 pb-2",
+              "border-border/50 relative z-0 max-h-[40vh] overflow-y-auto border-t pt-1.5 pb-2",
+              "transform-gpu transition-[transform,opacity] ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:animate-none",
+              "group-data-open/collapsible-content:animate-in group-data-closed/collapsible-content:animate-out",
+              "group-data-open/collapsible-content:fade-in-0 group-data-closed/collapsible-content:fade-out-0",
+              "group-data-open/collapsible-content:slide-in-from-top-4 group-data-closed/collapsible-content:slide-out-to-top-4",
+              "group-data-open/collapsible-content:blur-in-[2px] group-data-closed/collapsible-content:blur-out-[2px]",
+              "group-data-open/collapsible-content:duration-(--animation-duration) group-data-closed/collapsible-content:duration-(--animation-duration)",
             )}
           >
-            <div
-              ref={contentRef}
-              className={cn(
-                "flex flex-col gap-1",
-                "[&>*]:animate-in [&>*]:fade-in-0 [&>*]:slide-in-from-top-1 [&>*]:duration-(--animation-duration) [&>*]:ease-[cubic-bezier(0.32,0.72,0,1)] [&>*]:motion-reduce:animate-none",
-              )}
-            >
+            <div ref={contentRef} className={cn("flex flex-col gap-1")}>
               {children}
             </div>
           </div>

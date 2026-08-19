@@ -87,6 +87,14 @@ export interface PermissionSelect {
   options: PermissionOption[]
 }
 
+/** Whole-list todo snapshot projected by the host for the current session. */
+export type TodoStatus = 'pending' | 'in_progress' | 'completed'
+
+export interface TodoItem {
+  content: string
+  status: TodoStatus
+}
+
 export interface ProjectionBaseline {
   asOfSeq: number
   values: {
@@ -95,6 +103,7 @@ export interface ProjectionBaseline {
     contextPressure?: ContextPressureProjection
     contextBreakdown?: ContextBreakdownProjection
     goal?: GoalProjection | null
+    todos?: TodoItem[] | null
     [key: string]: unknown
   }
 }
@@ -125,9 +134,18 @@ export interface ContextBreakdownProjection {
   messageTokens?: number
 }
 
+export type QueueMessagePart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; attachmentId: string; mediaType?: string; name?: string; src?: string }
+
 export interface QueueMessage {
+  /** Queue occurrence id; distinct from the durable message id. */
   id: string
+  /** Durable message id used to retire a pending steering row on handoff. */
+  messageId?: string
   placement: 'queued' | 'steering' | 'context'
+  /** Complete per-message content, matching upstream SessionQueueMirror. */
+  parts: QueueMessagePart[]
   text: string
 }
 

@@ -22,17 +22,32 @@ type ThreadContentPart = Exclude<NonNullable<ThreadMessageLike['content']>, stri
 
 /** DshMessage → assistant-ui ThreadMessageLike。
  *  steering 角色对 assistant-ui 而言只能是 user/assistant，这里用 assistant 承载，
- *  但内容就一条 dsh-steering data part——thread 渲染层按 role==='steering'（store
- *  原数据）拦截成独立 steering 行，绝不落成普通 user 气泡或 assistant 正文。 */
+ *  但 thread 渲染层按 store 原数据拦截成与上游一致的 user-style steering 气泡，
+ *  不落成普通 assistant 正文。 */
 function convertDshMessage(message: DshMessage): ThreadMessageLike {
   const role: 'user' | 'assistant' = message.role === 'steering' ? 'assistant' : message.role
+  const steeringImages = message.parts.flatMap((part) =>
+    part.type === 'image'
+      ? [{
+          type: 'image' as const,
+          attachmentId: part.attachmentId,
+          mediaType: part.mediaType,
+          src: part.src,
+          name: part.name,
+        }]
+      : [],
+  )
   const content = message.parts.flatMap((part): ThreadContentPart[] => {
     if (part.type === 'tool' && role !== 'assistant') return []
     if (part.type === 'text') {
       return [{ type: 'text' as const, text: part.text }]
     }
     if (part.type === 'steering') {
-      return [{ type: 'data' as const, name: 'dsh-steering', data: { text: part.text } }]
+      return [{
+        type: 'data' as const,
+        name: 'dsh-steering',
+        data: { text: part.text, images: steeringImages },
+      }]
     }
     if (part.type === 'image') {
       return [{ type: 'image' as const, image: part.src ?? '' }]
@@ -42,6 +57,19 @@ function convertDshMessage(message: DshMessage): ThreadMessageLike {
     }
     if (part.type === 'context') {
       return [{ type: 'data' as const, name: 'dsh-context', data: { label: part.label, text: part.text } }]
+    }
+    if (part.type === 'generation-status') {
+      return [{
+        type: 'data' as const,
+        name: 'dsh-generation-status',
+        data: {
+          state: part.state,
+          title: part.title,
+          detail: part.detail,
+          retry: part.retry,
+          maxRetries: part.maxRetries,
+        },
+      }]
     }
     if (part.type === 'command') {
       return [{
@@ -219,7 +247,7 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
     }
 
     if (session?.origin === 'subagent') await sendSubagentPrompt(session, parts)
-    else await sendPrompt(sessionId, parts)
+    else await sendPrompt(sessionId, parts, useDsh.getState().isRunning ? 'steer' : 'queue')
     markSessionActive(sessionId)
   }, [createSession, executeCommand, markSessionActive, navigateToThread])
 

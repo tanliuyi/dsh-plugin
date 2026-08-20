@@ -217,6 +217,8 @@ function mergeSessionEvents(...pages: readonly FoldableSessionEvent[][]): Foldab
 const conversationFolds = new Map<string, ConversationFold>()
 /** 每个 session 已做过受控 history resync 的 mux generation；防止 subscribed → openSession 循环。 */
 const subscribedResyncGeneration = new Map<string, number>()
+/** Latest durable mux baseline, kept separate from the locally folded event watermark. */
+const subscribedLastSeqBySession = new Map<string, number>()
 
 interface DshState {
   booting: boolean
@@ -228,6 +230,8 @@ interface DshState {
   agentPresets: AgentPresetEntry[]
   subagentsByParent: Record<string, SubagentCatalog>
   settings: SettingsDescribeResponse | null
+  busyEnterBehavior: 'queue' | 'steer'
+  setBusyEnterBehavior: (behavior: 'queue' | 'steer') => void
   newSessionWorkspaceId: string | null
   newSessionAgentPreset: string | null
   threadListView: ThreadListViewState
@@ -329,6 +333,8 @@ export const useDsh = create<DshState>((set, get) => ({
   agentPresets: [],
   subagentsByParent: {},
   settings: null,
+  busyEnterBehavior: 'queue',
+  setBusyEnterBehavior: (busyEnterBehavior) => set({ busyEnterBehavior }),
   newSessionWorkspaceId: null,
   newSessionAgentPreset: null,
   threadListView: readThreadListView(),
@@ -390,6 +396,21 @@ export const useDsh = create<DshState>((set, get) => ({
           if (presets.ok) set({ agentPresets: presets.value.presets, newSessionAgentPreset: presets.value.presets.find((preset) => preset.isDefault && !preset.broken)?.id ?? null })
         } catch {
           // Older hosts may not expose agent presets.
+        }
+        try {
+          const settings = await rpc<SettingsDescribeResponse>('settings.describe')
+          if (settings.ok) {
+            const conversation = settings.value.namespaces.find((entry) => entry.ns === 'ui-conversation')?.value
+            const busyEnter = typeof conversation === 'object' && conversation !== null
+              ? (conversation as { busyEnter?: unknown }).busyEnter
+              : undefined
+            set({
+              settings: settings.value,
+              busyEnterBehavior: busyEnter === 'steer' ? 'steer' : 'queue',
+            })
+          }
+        } catch {
+          // Remote or older hosts may not expose settings.describe.
         }
         await get().refreshSessions()
         const restoredSessionId = get().currentSessionId
@@ -551,6 +572,25 @@ export const useDsh = create<DshState>((set, get) => ({
       }
       if (!result.ok) throw new Error(result.error.message)
       if (generation !== openSessionGeneration || get().currentSessionId !== sessionId) return
+
+      // The subscribed frame is the durable tail at connection time. History can
+      // race an event append and return an older tail, so mirror upstream's one
+      // tail-page repull before publishing an incomplete command lifecycle.
+      const subscribedLastSeq = subscribedLastSeqBySession.get(sessionId)
+      const historyTailSeq = result.value.events.at(-1)?.event.seq ?? -1
+      if (subscribedLastSeq !== undefined && subscribedLastSeq > historyTailSeq) {
+        result = session?.origin === 'subagent' && session.parentSessionId
+          ? await rpc('subagent.history', {
+              parentSessionId: session.parentSessionId,
+              childSessionId: sessionId,
+              mode: session.subagentMode ?? 'one-shot',
+              maxMessages: 200,
+            })
+          : await rpc('session.history', { sessionId, maxMessages: 200 })
+        if (!result.ok) throw new Error(result.error.message)
+        if (generation !== openSessionGeneration || get().currentSessionId !== sessionId) return
+      }
+
       const values = result.value.projections?.values
       const projectionGoal = values?.goal as GoalProjection | null | undefined
       const projectionPlan = values?.plan as { active?: unknown; pending?: unknown } | undefined
@@ -604,7 +644,7 @@ export const useDsh = create<DshState>((set, get) => ({
       folder.applyMessages(merged)
       if (generation !== openSessionGeneration || get().currentSessionId !== sessionId) return
       liveEventsDuringOpen.delete(sessionId)
-      const lastSeq = Math.max(0, folder.lastSeq)
+      const lastSeq = folder.lastSeq
       set({
         messages: merged,
         todos: currentTodos,
@@ -907,7 +947,7 @@ export const useDsh = create<DshState>((set, get) => ({
     const sessionId = addressedSessionId ?? get().currentSessionId
     if (!sessionId) throw new Error('command.execute requires a session')
     const result = await rpc<{ commandId: string; result: { kind: 'success' | 'error'; text?: string } } | undefined>('commands/execute', {
-      args: { agentId: sessionId, line },
+      args: { agentId: sessionId, line, images: [] },
     })
     if (!result.ok) throw new Error(`command.execute failed: ${result.error.code}: ${result.error.message}`)
     if (result.value === undefined) throw new Error(`unknown or malformed command: ${line}`)
@@ -927,6 +967,7 @@ export const useDsh = create<DshState>((set, get) => ({
       args: {
         agentId: sessionId,
         line: `/permission ${preset}`,
+        images: [],
       },
     })
     if (!result.ok) throw new Error(result.error.message)
@@ -1072,6 +1113,8 @@ export const useDsh = create<DshState>((set, get) => ({
     liveEventsDuringOpen.delete(sessionId)
     historyEventsBySession.delete(sessionId)
     conversationFolds.delete(sessionId)
+    subscribedLastSeqBySession.delete(sessionId)
+    subscribedResyncGeneration.delete(sessionId)
     set({
       sessions: state.sessions.filter((session) => session.sessionId !== sessionId),
       jobsBySession,
@@ -1177,7 +1220,9 @@ export const useDsh = create<DshState>((set, get) => ({
       void get().refreshSessions().catch(() => {})
     }
     if (sessionId !== get().currentSessionId) return
-    const lastSeq = get().lastEventSeqBySession[sessionId] ?? 0
+    // Session logs are zero-based. An unseen session therefore starts at -1;
+    // using 0 here silently drops its first live event.
+    const lastSeq = get().lastEventSeqBySession[sessionId] ?? -1
     if (ev.seq <= lastSeq) return
     set({ lastEventSeqBySession: { ...get().lastEventSeqBySession, [sessionId]: ev.seq } })
     const todo = applyTodoEvent(get().todos, ev)
@@ -1227,15 +1272,12 @@ export const useDsh = create<DshState>((set, get) => ({
   },
 
   // mux session/subscribed：host 在 (重)连后报出该 session 的 durable baseline seq。
-  // 用它与当前 generation 对齐 event watermark——重启/重连后的旧高 watermark 会误丢
-  // 新 generation 事件，因此无条件收敛到新 baseline；随后按需触发受控 history resync
-  // （历史 + live buffer 按 seq 合并去重），同一 stream generation 内每个 session 只
-  // 触发一次，避免形成 openSession 循环。
+  // baseline 只用于检测本地窗口缺口，不能冒充“已折叠 watermark”；否则与 history
+  // 并发落盘的 command/done 会被误判为已处理。同一 stream generation 每个 session
+  // 最多触发一次受控 history resync，避免形成 openSession 循环。
   handleSubscribed(sessionId, lastSeq, streamGeneration) {
-    const priorWatermark = get().lastEventSeqBySession[sessionId] ?? 0
-    if (lastSeq !== priorWatermark) {
-      set({ lastEventSeqBySession: { ...get().lastEventSeqBySession, [sessionId]: lastSeq } })
-    }
+    const priorWatermark = get().lastEventSeqBySession[sessionId] ?? -1
+    subscribedLastSeqBySession.set(sessionId, lastSeq)
     // projection baseline 与 new generation 对齐（row.seq > baseline 视为重启丢失）。
     get().truncateProjections(sessionId, lastSeq)
 

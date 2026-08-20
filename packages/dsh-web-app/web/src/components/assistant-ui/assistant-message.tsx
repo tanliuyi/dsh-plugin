@@ -4,10 +4,9 @@ import {
   MessagePrimitive,
   useAuiState,
 } from "@assistant-ui/react";
-import { LoaderCircleIcon, TerminalIcon } from "lucide-react";
-
 import { AssistantActionBar } from "@/components/assistant-ui/assistant-action-bar";
 import { ChainOfThought } from "@/components/assistant-ui/chain-of-thought";
+import { CommandMessage } from "@/components/assistant-ui/command-message";
 import { CompactionMessage } from "@/components/assistant-ui/compaction-message";
 import { ContextMessageSurface } from "@/components/assistant-ui/context-message-surface";
 import { File } from "@/components/assistant-ui/file";
@@ -49,7 +48,7 @@ export function AssistantMessage() {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150"
     >
       <div
         data-slot="aui_assistant-message-content"
@@ -88,6 +87,7 @@ export function AssistantMessage() {
                       part as {
                         data?: {
                           commandName?: string | null;
+                          args?: string | null;
                           outcome?: {
                             kind?: "success" | "error";
                             text?: string;
@@ -108,43 +108,7 @@ export function AssistantMessage() {
                       />
                     );
                   }
-                  const running = command.outcome == null;
-                  const failed = command.outcome?.kind === "error";
-                  const summary = running
-                    ? "Running command"
-                    : (command.outcome?.text ??
-                      (failed ? "Command failed" : "Command completed"));
-                  return (
-                    <div
-                      data-slot="aui_command"
-                      data-state={running ? "running" : failed ? "error" : "complete"}
-                      className="border-border/50 bg-muted/25 my-1 flex min-h-8 items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs"
-                      role="status"
-                    >
-                      {running ? (
-                        <LoaderCircleIcon className="text-muted-foreground size-3.5 shrink-0 animate-spin" />
-                      ) : (
-                        <TerminalIcon
-                          className={cn(
-                            "size-3.5 shrink-0",
-                            failed ? "text-destructive" : "text-muted-foreground",
-                          )}
-                        />
-                      )}
-                      <span className="font-medium">
-                        {command.commandName ?? "command"}
-                      </span>
-                      <span
-                        className={cn(
-                          "min-w-0 flex-1 truncate",
-                          failed ? "text-destructive" : "text-muted-foreground",
-                        )}
-                        title={summary}
-                      >
-                        {summary}
-                      </span>
-                    </div>
-                  );
+                  return <CommandMessage command={command} />;
                 }
                 if (part.name === "dsh-compaction") {
                   const compaction = (

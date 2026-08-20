@@ -1,5 +1,6 @@
 export interface ThreadMessageRow {
   id: string;
+  virtualKey?: string;
   role: "user" | "assistant" | "system";
 }
 

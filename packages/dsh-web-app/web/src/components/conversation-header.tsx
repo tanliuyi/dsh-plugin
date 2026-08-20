@@ -59,37 +59,12 @@ export function ConversationHeader() {
         </nav>
       </div>
 
-      {current.running ? (
-        <span
-          data-slot="aui_thread-header-running"
-          className="text-muted-foreground flex shrink-0 items-center gap-1.5 text-xs"
-          aria-label="Thread running"
-        >
-          <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden="true" />
-          <span className="hidden sm:inline">Running</span>
-        </span>
-      ) : null}
-
-      <TooltipIconButton
-        tooltip="Copy session path"
-        type="button"
-        variant="ghost"
-        size="icon"
-        className="ml-2 hidden size-7 md:inline-flex"
-        aria-label="Copy session path"
-        onClick={() => {
-          void navigator.clipboard?.writeText(current.cwd ?? current.sessionId)
-        }}
-      >
-        <FolderIcon className="size-3.5" />
-      </TooltipIconButton>
-
       <TooltipIconButton
         tooltip={sessionPanelOpen ? 'Collapse session panel' : 'Expand session panel'}
         type="button"
         variant="ghost"
         size="icon"
-        className="session-panel-trigger mr-9 size-7 shrink-0"
+        className="session-panel-trigger size-7 shrink-0"
         aria-label={sessionPanelOpen ? 'Collapse session panel' : 'Expand session panel'}
         aria-controls="session-panel"
         aria-expanded={sessionPanelOpen}

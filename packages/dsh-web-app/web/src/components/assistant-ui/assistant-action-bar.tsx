@@ -2,6 +2,7 @@ import {
   ActionBarMorePrimitive,
   ActionBarPrimitive,
   AuiIf,
+  useAuiState,
 } from "@assistant-ui/react";
 import {
   CheckIcon,
@@ -13,6 +14,13 @@ import {
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 
 export function AssistantActionBar() {
+  const showActions = useAuiState(
+    (state) =>
+      !state.thread.isRunning &&
+      (state.message.isLast || state.message.isHovering),
+  );
+  if (!showActions) return null;
+
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning

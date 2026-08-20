@@ -5,12 +5,15 @@ import { CheckIcon, CopyIcon } from "lucide-react";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
 
+const USER_MESSAGE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
 function formatUserMessageTime(time?: number): string | undefined {
-  if (time === undefined) return undefined;
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(time));
+  return time === undefined
+    ? undefined
+    : USER_MESSAGE_TIME_FORMATTER.format(new Date(time));
 }
 
 export function UserMessageActions({
@@ -22,12 +25,12 @@ export function UserMessageActions({
 }) {
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef<number | null>(null);
-  const timestamp = formatUserMessageTime(createdAt);
   const hideActions = useAuiState(
     (state) =>
       state.thread.isRunning ||
       (!state.message.isLast && !state.message.isHovering),
   );
+  const timestamp = hideActions ? undefined : formatUserMessageTime(createdAt);
 
   useEffect(
     () => () => {
@@ -55,7 +58,7 @@ export function UserMessageActions({
     }, 1_000);
   }, [text]);
 
-  if (timestamp === undefined && text === "") return null;
+  if (createdAt === undefined && text === "") return null;
 
   return (
     <div
@@ -66,24 +69,28 @@ export function UserMessageActions({
         hideActions && "invisible pointer-events-none",
       )}
     >
-      {timestamp !== undefined && (
-        <span className="text-sm leading-6 opacity-0 transition-opacity group-hover/user-message:opacity-100 group-focus-within/user-message:opacity-100">
-          {timestamp}
-        </span>
-      )}
-      {text !== "" && (
-        <TooltipIconButton
-          tooltip={copied ? "Copied" : "Copy"}
-          aria-label={copied ? "Copied" : "Copy"}
-          onClick={() => void copy()}
-          className="size-7"
-        >
-          {copied ? (
-            <CheckIcon className="size-4" />
-          ) : (
-            <CopyIcon className="size-4" />
+      {!hideActions && (
+        <>
+          {timestamp !== undefined && (
+            <span className="text-sm leading-6 opacity-0 transition-opacity group-hover/user-message:opacity-100 group-focus-within/user-message:opacity-100">
+              {timestamp}
+            </span>
           )}
-        </TooltipIconButton>
+          {text !== "" && (
+            <TooltipIconButton
+              tooltip={copied ? "Copied" : "Copy"}
+              aria-label={copied ? "Copied" : "Copy"}
+              onClick={() => void copy()}
+              className="size-7"
+            >
+              {copied ? (
+                <CheckIcon className="size-4" />
+              ) : (
+                <CopyIcon className="size-4" />
+              )}
+            </TooltipIconButton>
+          )}
+        </>
       )}
     </div>
   );

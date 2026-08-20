@@ -7,7 +7,6 @@ import {
 } from "@assistant-ui/react";
 import {
   defaultRangeExtractor,
-  elementScroll,
   type Range,
   useVirtualizer,
 } from "@tanstack/react-virtual";
@@ -27,30 +26,21 @@ import {
 } from "react";
 
 import {
-  buildThreadTurns,
   mergeSelectedVirtualIndexes,
   shouldPrefetchOlderHistory,
-  stabilizeThreadTurnIds,
   type ThreadMessageRow,
-  type ThreadTurn,
 } from "./thread-virtualization";
 
-const ESTIMATED_TURN_HEIGHT = 200;
+const ESTIMATED_ASSISTANT_MESSAGE_HEIGHT = 2_400;
+const ESTIMATED_OTHER_MESSAGE_HEIGHT = 240;
+const HISTORY_LOADER_HEIGHT = 36;
+const MESSAGE_GROUP_END_GAP = 56;
+const ESTIMATED_SCROLL_PADDING_END = 182;
 const AT_BOTTOM_THRESHOLD = 4;
 
 interface MessageSelectionRange {
   start: number;
   end: number;
-}
-
-interface HistoryScrollAnchorCandidate {
-  messageId: string;
-  viewportOffset: number;
-}
-
-interface HistoryScrollAnchor {
-  candidates: HistoryScrollAnchorCandidate[];
-  scrollHeight: number;
 }
 
 interface VirtualizedThreadMessagesProps {
@@ -63,309 +53,169 @@ export function VirtualizedThreadMessages({
   messageComponent,
 }: VirtualizedThreadMessagesProps) {
   const messageRows = useThreadMessageRows();
-  const turns = useThreadTurns(messageRows);
-  const isRunning = useAuiState((state) => state.thread.isRunning);
   const historyHasMore = useDsh((state) => state.historyHasMore);
   const loadingMoreHistory = useDsh((state) => state.loadingMoreHistory);
   const historyLoadError = useDsh((state) => state.historyLoadError);
   const loadMoreHistory = useDsh((state) => state.loadMoreHistory);
   const contentRef = useRef<HTMLDivElement>(null);
-  const stickyRef = useRef(true);
-  const loadingAnchorRef = useRef<HistoryScrollAnchor | null>(null);
+  const pinnedToEndRef = useRef(true);
+  const [scrollPaddingEnd, setScrollPaddingEnd] = useState(
+    ESTIMATED_SCROLL_PADDING_END,
+  );
   const [selectionRange, setSelectionRange] =
     useState<MessageSelectionRange | null>(null);
-  const [historyAnchorMessageIds, setHistoryAnchorMessageIds] = useState<
-    readonly string[]
-  >([]);
   const getItemKey = useCallback(
-    (index: number) => turns[index]?.id ?? index,
-    [turns],
+    (index: number) =>
+      messageRows[index]?.virtualKey ?? messageRows[index]?.id ?? index,
+    [messageRows],
   );
   const rangeExtractor = useCallback(
     (range: Range) => {
+      const visibleIndexes = defaultRangeExtractor(range);
       const indexes = selectionRange
         ? mergeSelectedVirtualIndexes(
-            defaultRangeExtractor(range),
+            visibleIndexes,
             selectionRange,
             range.count,
           )
-        : defaultRangeExtractor(range);
-      const historyAnchorIndex = historyAnchorMessageIds
-        .map((messageId) =>
-          turns.findIndex((turn) => turn.messageIds.includes(messageId)),
-        )
-        .find((index) => index >= 0) ?? -1;
-      if (
-        historyAnchorIndex < 0 ||
-        historyAnchorIndex >= range.count ||
-        indexes.includes(historyAnchorIndex)
-      ) {
-        return indexes;
+        : visibleIndexes;
+      if (!pinnedToEndRef.current || range.count === 0) return indexes;
+      const pinnedIndexes = new Set(indexes);
+      const pinnedStart = Math.max(0, range.count - 2);
+      for (let index = pinnedStart; index < range.count; index += 1) {
+        pinnedIndexes.add(index);
       }
-      return [...indexes, historyAnchorIndex].sort((left, right) => left - right);
+      return [...pinnedIndexes].sort((left, right) => left - right);
     },
-    [historyAnchorMessageIds, selectionRange, turns],
+    [selectionRange],
   );
+  // A history page can start mid-turn. Message keys stay stable when prepend
+  // later merges that partial turn with its preceding user message.
   const virtualizer = useVirtualizer({
-    count: turns.length,
-    estimateSize: () => ESTIMATED_TURN_HEIGHT,
+    count: messageRows.length,
+    estimateSize: (index) =>
+      index < messageRows.length - 1 &&
+      messageRows[index]?.role === "assistant"
+        ? ESTIMATED_ASSISTANT_MESSAGE_HEIGHT
+        : ESTIMATED_OTHER_MESSAGE_HEIGHT,
     getItemKey,
     getScrollElement: () => viewportRef.current,
     initialRect: { height: 800, width: 800 },
-    overscan: 6,
+    overscan: 20,
+    paddingStart: HISTORY_LOADER_HEIGHT,
     rangeExtractor,
-    scrollToFn: (offset, options, instance) => {
-      const element = instance.scrollElement;
-      if (!element) return;
-      if (stickyRef.current) {
-        const maxScroll = element.scrollHeight - element.clientHeight;
-        const targetOffset = offset + (options.adjustments ?? 0);
-        if (
-          maxScroll - element.scrollTop <= AT_BOTTOM_THRESHOLD &&
-          targetOffset < maxScroll
-        ) {
-          return;
-        }
-      }
-      elementScroll(offset, options, instance);
-    },
+    anchorTo: "end",
+    followOnAppend: true,
+    scrollEndThreshold: AT_BOTTOM_THRESHOLD,
+    scrollPaddingEnd,
+    useAnimationFrameWithResizeObserver: true,
+    directDomUpdates: true,
+    directDomUpdatesMode: "transform",
+    // This list measures during React commits; nested react-dom flushSync warns.
+    useFlushSync: false,
   });
-
-  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (
-    item,
-    _delta,
-    instance,
-  ) => {
-    if (loadingAnchorRef.current) return false;
-    const element = instance.elementsCache.get(item.key);
-    const scrollElement = instance.scrollElement;
-    if (!element || !scrollElement) {
-      return item.end <= (instance.scrollOffset ?? 0);
-    }
-    return (
-      element.getBoundingClientRect().bottom <=
-      scrollElement.getBoundingClientRect().top
-    );
-  };
-
-  const findMessageElement = useCallback((messageId: string) => {
-    const content = contentRef.current;
-    if (!content) return null;
-    const marker = Array.from(
-      content.querySelectorAll<HTMLElement>("[data-virtual-message-id]"),
-    ).find((element) => element.dataset.virtualMessageId === messageId);
-    return marker?.firstElementChild instanceof HTMLElement
-      ? marker.firstElementChild
-      : null;
-  }, []);
-
-  const requestOlderHistory = useCallback(() => {
-    const element = viewportRef.current;
-    if (
-      !element ||
-      loadingMoreHistory ||
-      loadingAnchorRef.current ||
-      !historyHasMore
-    ) {
-      return;
-    }
-    const viewportTop = element.getBoundingClientRect().top;
-    const candidates = Array.from(
-      contentRef.current?.querySelectorAll<HTMLElement>(
-        "[data-virtual-message-id]",
-      ) ?? [],
-    ).flatMap((marker) => {
-      const messageElement = marker.firstElementChild;
-      const messageId = marker.dataset.virtualMessageId;
-      if (
-        !(messageElement instanceof HTMLElement) ||
-        !messageId ||
-        messageElement.getBoundingClientRect().bottom <= viewportTop
-      ) {
-        return [];
-      }
-      return [{
-        messageId,
-        viewportOffset:
-          messageElement.getBoundingClientRect().top - viewportTop,
-      }];
-    });
-    if (candidates.length === 0) return;
-
-    stickyRef.current = false;
-    loadingAnchorRef.current = {
-      candidates,
-      scrollHeight: element.scrollHeight,
-    };
-    setHistoryAnchorMessageIds(candidates.map((candidate) => candidate.messageId));
-    void loadMoreHistory();
-  }, [historyHasMore, loadMoreHistory, loadingMoreHistory, viewportRef]);
+  const setContentElement = useCallback(
+    (element: HTMLDivElement | null) => {
+      contentRef.current = element;
+      virtualizer.containerRef(element);
+    },
+    [virtualizer],
+  );
 
   useLayoutEffect(() => {
-    const historyAnchor = loadingAnchorRef.current;
-    if (loadingMoreHistory || !historyAnchor) return;
-    let anchor: HistoryScrollAnchorCandidate | undefined;
-    for (const candidate of historyAnchor.candidates) {
-      const survives = turns.some((turn) =>
-        turn.messageIds.includes(candidate.messageId),
-      );
-      if (!survives) continue;
-      anchor = candidate;
-      break;
-    }
-    // The range extractor mounts the surviving anchor in the prepend render, so
-    // the first correction can use real DOM geometry before the browser paints.
-    const viewport = viewportRef.current;
-    const previousScrollBehavior = viewport?.style.scrollBehavior ?? "";
-    if (viewport) viewport.style.scrollBehavior = "auto";
-    let frame: number | undefined;
-    let attempts = 0;
-    let previousScrollHeight = historyAnchor.scrollHeight;
-    const correctAnchor = () => {
-      if (loadingAnchorRef.current !== historyAnchor) return;
-      const viewport = viewportRef.current;
-      if (!viewport) return;
-      const anchorElement = anchor
-        ? findMessageElement(anchor.messageId)
-        : null;
-      if (anchor && anchorElement) {
-        const currentOffset =
-          anchorElement.getBoundingClientRect().top -
-          viewport.getBoundingClientRect().top;
-        const adjustment = currentOffset - anchor.viewportOffset;
-        if (Math.abs(adjustment) > 0.5) viewport.scrollTop += adjustment;
-      } else {
-        const heightDelta = viewport.scrollHeight - previousScrollHeight;
-        if (heightDelta > 0) viewport.scrollTop += heightDelta;
-      }
-      previousScrollHeight = viewport.scrollHeight;
+    const footer = viewportRef.current?.querySelector<HTMLElement>(
+      ".aui-thread-viewport-footer",
+    );
+    if (!footer) return;
+    const updateScrollPaddingEnd = () => {
+      setScrollPaddingEnd(footer.offsetHeight + MESSAGE_GROUP_END_GAP);
     };
-    const resizeObserver = new ResizeObserver(correctAnchor);
-    if (contentRef.current) resizeObserver.observe(contentRef.current);
-    correctAnchor();
+    const observer = new ResizeObserver(updateScrollPaddingEnd);
+    observer.observe(footer);
+    updateScrollPaddingEnd();
+    return () => observer.disconnect();
+  }, [viewportRef]);
 
-    const restoreAnchor = () => {
-      if (loadingAnchorRef.current !== historyAnchor) return;
-      correctAnchor();
-      attempts += 1;
-      if (attempts < 8) {
-        frame = requestAnimationFrame(restoreAnchor);
-      } else {
-        loadingAnchorRef.current = null;
-        setHistoryAnchorMessageIds([]);
-        resizeObserver.disconnect();
-        if (viewport) viewport.style.scrollBehavior = previousScrollBehavior;
-      }
-    };
-    frame = requestAnimationFrame(restoreAnchor);
-    return () => {
-      resizeObserver.disconnect();
-      if (frame !== undefined) cancelAnimationFrame(frame);
-      if (viewport) viewport.style.scrollBehavior = previousScrollBehavior;
-    };
-  }, [findMessageElement, loadingMoreHistory, turns, viewportRef, virtualizer]);
+  const measureVirtualRow = useCallback(
+    (element: HTMLDivElement | null) => {
+      virtualizer.measureElement(element);
+      if (!element) return;
+      const images = Array.from(element.querySelectorAll("img"));
+      if (images.length === 0) return;
+      void Promise.all(images.map((image) => image.decode().catch(() => undefined)))
+        .then(() => {
+          if (!element.isConnected) return;
+          const index = Number(element.dataset.index);
+          if (Number.isInteger(index)) {
+            virtualizer.resizeItem(index, element.getBoundingClientRect().height);
+            if (pinnedToEndRef.current) virtualizer.scrollToEnd();
+          }
+        });
+    },
+    [virtualizer],
+  );
+
+  const requestOlderHistory = useCallback(() => {
+    if (loadingMoreHistory || !historyHasMore) return;
+    void loadMoreHistory();
+  }, [historyHasMore, loadMoreHistory, loadingMoreHistory]);
 
   const jumpToBottom = useCallback(() => {
-    stickyRef.current = true;
-    if (turns.length > 0) {
-      virtualizer.scrollToIndex(turns.length - 1, { align: "end" });
-    }
-    requestAnimationFrame(() => {
-      const element = viewportRef.current;
-      if (element && stickyRef.current) {
-        element.scrollTop = element.scrollHeight;
+    virtualizer.scrollToEnd();
+  }, [virtualizer]);
+
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const observedRows = new Set<HTMLDivElement>();
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const row = entry.target as HTMLDivElement;
+        const index = Number(row.dataset.index);
+        if (Number.isInteger(index)) {
+          virtualizer.resizeItem(index, row.getBoundingClientRect().height);
+        }
       }
+      if (pinnedToEndRef.current) virtualizer.scrollToEnd();
     });
-  }, [turns.length, viewportRef, virtualizer]);
+    const syncObservedRows = () => {
+      const mountedRows = new Set(
+        content.querySelectorAll<HTMLDivElement>("[data-virtual-message-index]"),
+      );
+      for (const row of observedRows) {
+        if (mountedRows.has(row)) continue;
+        resizeObserver.unobserve(row);
+        observedRows.delete(row);
+      }
+      for (const row of mountedRows) {
+        if (observedRows.has(row)) continue;
+        observedRows.add(row);
+        resizeObserver.observe(row);
+      }
+    };
+    const mutationObserver = new MutationObserver(syncObservedRows);
+    syncObservedRows();
+    mutationObserver.observe(content, { childList: true });
+    return () => {
+      mutationObserver.disconnect();
+      resizeObserver.disconnect();
+    };
+  }, [virtualizer]);
 
   useEffect(() => {
     const element = viewportRef.current;
     if (!element) return;
-    let lastScrollTop = element.scrollTop;
-    let lastScrollHeight = element.scrollHeight;
-    let lastClientHeight = element.clientHeight;
     const onScroll = () => {
-      const atBottom =
-        element.scrollHeight - element.scrollTop - element.clientHeight <=
-        AT_BOTTOM_THRESHOLD;
-      if (atBottom && !loadingAnchorRef.current) stickyRef.current = true;
-      else if (
-        element.scrollTop < lastScrollTop &&
-        element.scrollHeight === lastScrollHeight &&
-        Math.abs(element.clientHeight - lastClientHeight) <= 1
-      ) {
-        stickyRef.current = false;
-      }
-      const loadingAnchor = loadingAnchorRef.current;
-      if (loadingMoreHistory && loadingAnchor) {
-        const viewportTop = element.getBoundingClientRect().top;
-        loadingAnchor.candidates = loadingAnchor.candidates.map((candidate) => {
-          const messageElement = findMessageElement(candidate.messageId);
-          return messageElement
-            ? {
-                ...candidate,
-                viewportOffset:
-                  messageElement.getBoundingClientRect().top - viewportTop,
-              }
-            : candidate;
-        });
-        loadingAnchor.scrollHeight = element.scrollHeight;
-      }
-      lastScrollTop = element.scrollTop;
-      lastScrollHeight = element.scrollHeight;
-      lastClientHeight = element.clientHeight;
+      pinnedToEndRef.current = virtualizer.isAtEnd();
       if (
         shouldPrefetchOlderHistory(element.scrollTop, element.clientHeight)
       ) {
         requestOlderHistory();
       }
     };
-    const onWheel = (event: WheelEvent) => {
-      if (event.deltaY < 0) stickyRef.current = false;
-    };
-    const disarm = () => {
-      stickyRef.current = false;
-    };
     element.addEventListener("scroll", onScroll, { passive: true });
-    element.addEventListener("wheel", onWheel, { passive: true });
-    element.addEventListener("touchmove", disarm, { passive: true });
-    return () => {
-      element.removeEventListener("scroll", onScroll);
-      element.removeEventListener("wheel", onWheel);
-      element.removeEventListener("touchmove", disarm);
-    };
-  }, [findMessageElement, loadingMoreHistory, requestOlderHistory, viewportRef]);
-
-  useEffect(() => {
-    const element = viewportRef.current;
-    const content = contentRef.current;
-    if (!element || !content) return;
-    // 追底写入合并到 rAF：一帧最多一次。折叠/展开的 200ms 高度动画会让消息列表
-    // 每帧多次 resize，若每回调都同步写 scrollTop，帧内多次写入会用中途各不一致
-    // 的 scrollHeight 互相覆盖，表现为滚到底时页面跳动/闪烁（展开尤其明显）。
-    // 合并后统一在绘制前落笔，且只在「sticky 且当前不在最底部」时才写：
-    // - 展开/流式增长：只要内容超出底部一帧，就在绘制前补回 → 平滑钉底；
-    // - 收起/变矮：浏览器会自行把 scrollTop 钳制回新的最大可滚值，我们既不写也
-    //   不会抖动，避免主动写造成的一次性过冲闪烁。
-    let frame: number | undefined;
-    const pinToBottom = () => {
-      if (frame !== undefined) return;
-      frame = requestAnimationFrame(() => {
-        frame = undefined;
-        if (!stickyRef.current) return;
-        const { scrollTop, scrollHeight, clientHeight } = element;
-        const atBottom =
-          scrollHeight - scrollTop - clientHeight <= AT_BOTTOM_THRESHOLD;
-        if (!atBottom) element.scrollTop = scrollHeight;
-      });
-    };
-    const observer = new ResizeObserver(pinToBottom);
-    observer.observe(content);
-    return () => {
-      observer.disconnect();
-      if (frame !== undefined) cancelAnimationFrame(frame);
-    };
-  }, [viewportRef]);
+    return () => element.removeEventListener("scroll", onScroll);
+  }, [requestOlderHistory, viewportRef, virtualizer]);
 
   useEffect(() => {
     const updateSelectionRange = () => {
@@ -374,15 +224,15 @@ export function VirtualizedThreadMessages({
         setSelectionRange(null);
         return;
       }
-      const turnIndex = (node: Node | null): number | undefined => {
+      const messageIndex = (node: Node | null): number | undefined => {
         const element = node instanceof Element ? node : node?.parentElement;
-        const row = element?.closest<HTMLElement>("[data-virtual-turn-index]");
+        const row = element?.closest<HTMLElement>("[data-virtual-message-index]");
         if (!row || !contentRef.current?.contains(row)) return undefined;
-        const index = Number(row.dataset.virtualTurnIndex);
+        const index = Number(row.dataset.virtualMessageIndex);
         return Number.isInteger(index) ? index : undefined;
       };
-      const anchor = turnIndex(selection.anchorNode);
-      const focus = turnIndex(selection.focusNode);
+      const anchor = messageIndex(selection.anchorNode);
+      const focus = messageIndex(selection.focusNode);
       const startIndex = anchor ?? focus;
       const endIndex = focus ?? anchor;
       if (startIndex === undefined || endIndex === undefined) {
@@ -402,48 +252,31 @@ export function VirtualizedThreadMessages({
       document.removeEventListener("selectionchange", updateSelectionRange);
   }, []);
 
-  const previousIsRunningRef = useRef(false);
   const didInitialJumpRef = useRef(false);
 
   useLayoutEffect(() => {
-    if (isRunning && !previousIsRunningRef.current && stickyRef.current) {
-      jumpToBottom();
-    }
-    previousIsRunningRef.current = isRunning;
-  }, [isRunning, jumpToBottom]);
-
-  useLayoutEffect(() => {
-    if (didInitialJumpRef.current || turns.length === 0) return;
+    if (didInitialJumpRef.current || messageRows.length === 0) return;
     didInitialJumpRef.current = true;
     jumpToBottom();
-  }, [jumpToBottom, turns.length]);
+  }, [jumpToBottom, messageRows.length]);
 
   const items = virtualizer.getVirtualItems();
-  const paddingTop = items[0]?.start ?? 0;
-  const paddingBottom = Math.max(
-    0,
-    virtualizer.getTotalSize() - (items.at(-1)?.end ?? 0),
-  );
   const messageComponents = useMemo(
     () => ({ Message: messageComponent }),
     [messageComponent],
   );
   const showHistoryLoader =
     historyHasMore || loadingMoreHistory || historyLoadError !== null;
-  const restoringHistory =
-    loadingMoreHistory || historyAnchorMessageIds.length > 0;
 
   return (
     <div
-      ref={contentRef}
+      ref={setContentElement}
       data-slot="aui_virtualized-message-list"
-      data-history-restoring={restoringHistory || undefined}
-      className="[overflow-anchor:none]"
-      style={{ paddingTop, paddingBottom }}
+      className="relative [overflow-anchor:none]"
     >
       <div
         data-slot="aui_history-loader"
-        className={`text-muted-foreground flex min-h-9 items-center justify-center gap-2 pb-3 text-xs ${showHistoryLoader ? "" : "invisible"}`}
+        className={`text-muted-foreground absolute inset-x-0 top-0 flex h-9 items-center justify-center gap-2 pb-3 text-xs ${showHistoryLoader ? "" : "invisible"}`}
         role={showHistoryLoader ? "status" : undefined}
         aria-hidden={showHistoryLoader ? undefined : true}
       >
@@ -467,33 +300,33 @@ export function VirtualizedThreadMessages({
         )}
       </div>
       {items.map((item) => {
-        const turn = turns[item.index];
-        if (!turn) return null;
+        const message = messageRows[item.index];
+        if (!message) return null;
         return (
           <div
             key={item.key}
-            ref={virtualizer.measureElement}
+            ref={measureVirtualRow}
             data-index={item.index}
-            data-virtual-turn-index={item.index}
-            data-slot="aui_thread-turn"
+            data-virtual-message-id={message.id}
+            data-virtual-message-index={item.index}
+            data-slot="aui_thread-message"
             className={
-              item.index === turns.length - 1
-                ? "flex flex-col gap-y-6"
-                : "flex flex-col gap-y-6 pb-6"
+              item.index === messageRows.length - 1
+                ? "absolute left-0 top-0 w-full"
+                : "absolute left-0 top-0 w-full pb-6"
             }
+            onLoadCapture={(event) => {
+              virtualizer.resizeItem(
+                item.index,
+                event.currentTarget.getBoundingClientRect().height,
+              );
+              if (pinnedToEndRef.current) virtualizer.scrollToEnd();
+            }}
           >
-            {turn.messageIds.map((messageId) => (
-              <div
-                key={messageId}
-                className="contents"
-                data-virtual-message-id={messageId}
-              >
-                <ThreadPrimitive.Unstable_MessageById
-                  messageId={messageId}
-                  components={messageComponents}
-                />
-              </div>
-            ))}
+            <ThreadPrimitive.Unstable_MessageById
+              messageId={message.id}
+              components={messageComponents}
+            />
           </div>
         );
       })}
@@ -502,6 +335,15 @@ export function VirtualizedThreadMessages({
 }
 
 function useThreadMessageRows(): readonly ThreadMessageRow[] {
+  const dshMessages = useDsh((state) => state.messages);
+  const virtualKeyById = useMemo(
+    () => new Map<string, string>(dshMessages.flatMap((message) =>
+      message.virtualKey === undefined
+        ? []
+        : [[message.id, message.virtualKey] as const],
+    )),
+    [dshMessages],
+  );
   const previousRowsRef = useRef<readonly ThreadMessageRow[]>([]);
   return useAuiState((state) => {
     const messages = state.thread.messages;
@@ -513,32 +355,22 @@ function useThreadMessageRows(): readonly ThreadMessageRow[] {
         return (
           message !== undefined &&
           row.id === message.id &&
+          row.virtualKey === virtualKeyById.get(message.id) &&
           row.role === message.role
         );
       })
     ) {
       return previous;
     }
-    const next = messages.map(({ id, role }: ThreadMessage) => ({ id, role }));
+    const next = messages.map(({ id, role }: ThreadMessage) => {
+      const virtualKey = virtualKeyById.get(id);
+      return {
+        id,
+        role,
+        ...(virtualKey === undefined ? {} : { virtualKey }),
+      };
+    });
     previousRowsRef.current = next;
     return next;
   });
-}
-
-function useThreadTurns(
-  messageRows: readonly ThreadMessageRow[],
-): readonly ThreadTurn[] {
-  const previousTurnsRef = useRef<readonly ThreadTurn[]>([]);
-  const turns = useMemo(
-    () =>
-      stabilizeThreadTurnIds(
-        previousTurnsRef.current,
-        buildThreadTurns(messageRows),
-      ),
-    [messageRows],
-  );
-  useLayoutEffect(() => {
-    previousTurnsRef.current = turns;
-  }, [turns]);
-  return turns;
 }

@@ -217,6 +217,28 @@ export interface SettingsDescribeResponse {
   namespaces: SettingsNamespaceView[]
 }
 
+export type SettingsPathOpView =
+  | { op: 'set'; path: string[]; value: unknown }
+  | { op: 'unset'; path: string[] }
+
+export interface SettingsUpdateRequest {
+  ns: string
+  patch: Record<string, unknown>
+  expectedRevision?: number
+}
+
+export interface SettingsReplaceRequest {
+  ns: string
+  section: Record<string, unknown>
+  expectedRevision?: number
+}
+
+export interface SettingsMutateRequest {
+  ns: string
+  ops: SettingsPathOpView[]
+  expectedRevision?: number
+}
+
 export interface GoalRef {
   id: string
   revision: number
@@ -297,6 +319,40 @@ export interface ModelProviderGroup {
 export interface ModelCatalogResponse {
   groups: ModelProviderGroup[]
   failures?: { id: string; name: string; message: string }[]
+}
+
+export interface ConfigurableProviderView {
+  provider: string
+  displayName: string
+  settingsNs: string
+  settingsPath: string[]
+  active: boolean
+  declared?: boolean
+}
+
+export interface CredentialView {
+  configured: boolean
+  source?: string
+  writable: boolean
+}
+
+export interface DiscoveredModelView {
+  id: string
+  name?: string
+  contextWindow?: number
+  maxTokens?: number
+}
+
+export interface LlmDiscoverModelsRequest {
+  settingsNs: string
+  provider?: string
+  baseURL?: string
+  api?: string
+  apiKey?: string
+}
+
+export interface LlmDiscoverModelsResponse {
+  models: DiscoveredModelView[]
 }
 
 export interface SessionModels {

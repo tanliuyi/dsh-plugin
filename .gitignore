@@ -16,3 +16,4 @@ dist/
 # vendored fork ships a prebuilt client bundle (dsh skin) — keep lib/ tracked
 !packages/dsh-client-ui-skin-claude/lib/
 .pi/subagents/
+artifacts/

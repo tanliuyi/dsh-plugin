@@ -251,7 +251,9 @@ const ThreadRootContent: FC<{ isEmpty: boolean }> = ({ isEmpty }) => {
     >
       <ThreadPrimitive.Viewport
         ref={viewportRef}
-        turnAnchor="top"
+        turnAnchor="bottom"
+        autoScroll={false}
+        scrollToBottomOnRunStart={false}
         scrollToBottomOnThreadSwitch={false}
         scrollToBottomOnInitialize={false}
         data-slot="aui_thread-viewport"

@@ -53,6 +53,17 @@
       config:
         trustedHosts: !!js ctx.webStartup.trustedHosts
 
+    # 仅加载三个官方包的 Host half，注册 rc.8 通用设置 namespace。
+    # 不扫描/下发它们的 browser bundle，独立 SPA 仍不使用 __DSH_BOOT__。
+    - id: ui-theme
+      name: '@deepseek-ai/dsh-client-ui-theme'
+
+    - id: locale
+      name: '@deepseek-ai/dsh-client-locale'
+
+    - id: ui-conversation
+      name: '@deepseek-ai/dsh-client-ui-conversation'
+
     # 自建 web runtime：SPA 静态服务（fallback seat）+ URL 打印。
     - id: web-runtime
       name: '@dsh-plugins/dsh-web-app'

@@ -52,8 +52,10 @@ export interface FoldableSessionEvent {
 }
 
 export interface DshMessage {
-  /** 稳定 id：优先取 wire 上的 messageId/callId，否则用事件 seq。 */
+  /** Wire-facing message id used by assistant-ui actions and message lookup. */
   id: string
+  /** Stable virtualization identity when one logical row changes wire id. */
+  virtualKey?: string
   /** steering：被 next-step inbox claim 的 user 输入，渲染为 user-style steering 气泡。 */
   role: 'user' | 'assistant' | 'steering'
   parts: DshMessagePart[]
@@ -301,9 +303,36 @@ function finalizedAssistantMessage(messages: DshMessage[], data: Record<string, 
   const finalized: DshMessage = { id, role: 'assistant', parts, ...base }
   const partialIndex = clean.findIndex((item) => item.id === partialMessageId(data))
   if (partialIndex < 0) return [...clean, finalized]
+  const partial = clean[partialIndex]!
   const result = [...clean]
-  result[partialIndex] = finalized
+  result[partialIndex] = {
+    ...finalized,
+    virtualKey: partial.virtualKey ?? partial.id,
+  }
   return result
+}
+
+/** rc.8 no longer appends an interrupted assistant/message after cancellation.
+ * Freeze any visible chunk accumulator at turn/end so replay and later turns
+ * treat it as a settled message rather than a live partial. */
+function settleTurnPartials(messages: DshMessage[], data: Record<string, unknown>): DshMessage[] {
+  const turn = String(data.turn ?? 'unknown')
+  const partialPrefix = `partial-${turn}-`
+  const statusPrefix = `generation-status-${turn}-`
+  return messages.flatMap((message) => {
+    if (message.id.startsWith(statusPrefix)) return []
+    if (!message.id.startsWith(partialPrefix)) return [message]
+    const step = message.id.slice(partialPrefix.length)
+    const parts = message.parts.filter((part) => (
+      (part.type !== 'text' && part.type !== 'reasoning') || part.text !== ''
+    ))
+    return parts.length === 0 ? [] : [{
+      ...message,
+      id: `settled-${turn}-${step}`,
+      virtualKey: message.virtualKey ?? message.id,
+      parts,
+    }]
+  })
 }
 
 /** 递增组装：把一条新事件并入已有消息列表。返回 { messages, isRunning } 或 null（忽略）。
@@ -512,7 +541,7 @@ export function foldEvent(
     case 'turn/start':
       return { messages, isRunning: true }
     case 'turn/end':
-      return { messages, isRunning: false }
+      return { messages: settleTurnPartials(messages, data), isRunning: false }
     case 'command/run': {
       const commandId = String(data.commandId ?? `c-${ev.seq}`)
       const msg: DshMessage = {

@@ -2,7 +2,7 @@
 
 DeepSeek Harness（`dsh`）插件集仓库。采用 pnpm workspace 管理，**一个插件一个包**，所有插件包位于 `packages/` 下。
 
-> 兼容目标：[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（developer preview，可能有破坏性变更），本地安装版本 `@deepseek-ai/dsh@0.1.0-rc.6`。
+> 兼容目标：[deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（developer preview，可能有破坏性变更），本地安装版本 `@deepseek-ai/dsh@0.1.0-rc.8`。
 
 ## 目录结构
 

@@ -1,23 +1,38 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import {
   BotIcon,
   CheckIcon,
   ExternalLinkIcon,
   FileCogIcon,
-  KeyRoundIcon,
   LoaderCircleIcon,
+  MonitorIcon,
+  MoonIcon,
   PuzzleIcon,
-  SaveIcon,
   Settings2Icon,
-  ShieldCheckIcon,
-  SquareTerminalIcon,
+  SunIcon,
   XIcon,
   type LucideIcon,
 } from "lucide-react";
 
-import { rpc } from "@/dsh/api";
+import { useDsh } from "@/dsh/store";
+import {
+  rpc,
+  type AgentPresetEntry,
+  type AgentPresetListResponse,
+  type ConfigurableProviderView,
+  type CredentialView,
+  type LlmDiscoverModelsRequest,
+  type LlmDiscoverModelsResponse,
+  type ModelCatalogResponse,
+  type ModelProviderGroup,
+  type SettingsDescribeResponse,
+  type SettingsMutateRequest,
+  type SettingsNamespaceView,
+  type SettingsPathOpView,
+  type SettingsUpdateRequest,
+} from "@/dsh/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -26,9 +41,9 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Textarea } from "@/components/ui/textarea";
+import { Select } from "@/components/select";
+import { ModelsSettingsForms, PluginSettingsForms } from "@/components/settings-forms";
 import { cn } from "@/lib/utils";
 
 export type SettingsDialogProps = {
@@ -36,27 +51,41 @@ export type SettingsDialogProps = {
   onOpenChange: (open: boolean) => void;
 };
 
-type SettingsNamespace = {
-  ns: string;
-  value: unknown;
-  applies: "live" | "restart";
-  secrets: { path: string[]; set: boolean }[];
-  revision: number;
-};
+type RequestResult<T = unknown> =
+  | { ok: true; value: T }
+  | { ok: false; error?: { code?: string; message?: string } };
 
-type SettingsDescription = {
-  writable: boolean;
-  namespaces: SettingsNamespace[];
-  hasDocument: boolean;
-};
+type SettingsSectionId = "general" | "models" | "plugins" | "agent-presets";
+type ThemePreference = "light" | "dark" | "system";
 
-type RequestResult = { ok: true; value: unknown } | { ok: false; error?: { message?: string } };
-
-type NamespacePresentation = {
+type SettingsSection = {
+  id: SettingsSectionId;
   label: string;
-  description: string;
   Icon: LucideIcon;
 };
+
+const SECTIONS: readonly SettingsSection[] = [
+  { id: "general", label: "通用设置", Icon: Settings2Icon },
+  { id: "models", label: "模型", Icon: BotIcon },
+  { id: "plugins", label: "插件", Icon: PuzzleIcon },
+  { id: "agent-presets", label: "Agent 预设", Icon: FileCogIcon },
+];
+
+const PERMISSION_OPTIONS = [
+  { value: "read-only", label: "Read Only" },
+  { value: "workspace-write", label: "Workspace Write" },
+  { value: "danger-full-access", label: "Full access" },
+] as const;
+
+const ENTER_OPTIONS = [
+  { value: "queue", label: "排队发送" },
+  { value: "steer", label: "插话发送" },
+] as const;
+
+const LOCALE_OPTIONS = [
+  { value: "zh", label: "中文" },
+  { value: "en", label: "English" },
+] as const;
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -67,115 +96,252 @@ function displayError(result: RequestResult): string {
   return result.ok ? "" : result.error?.message ?? "请求失败。";
 }
 
-function namespacePresentation(namespace: string): NamespacePresentation {
-  const normalized = namespace.toLowerCase();
-  if (normalized.includes("model")) {
-    return { label: "模型", description: "配置模型提供商、模型参数及默认模型。", Icon: BotIcon };
-  }
-  if (normalized.includes("plugin")) {
-    return { label: "插件", description: "管理插件运行时使用的配置。", Icon: PuzzleIcon };
-  }
-  if (normalized.includes("permission") || normalized.includes("sandbox") || normalized.includes("security")) {
-    return { label: "权限", description: "设置工具执行与沙箱访问策略。", Icon: ShieldCheckIcon };
-  }
-  if (normalized.includes("credential") || normalized.includes("secret") || normalized.includes("key")) {
-    return { label: "凭据", description: "管理服务连接所需的凭据配置。", Icon: KeyRoundIcon };
-  }
-  if (normalized.includes("shell") || normalized.includes("bash") || normalized.includes("pwsh") || normalized.includes("terminal")) {
-    return { label: "终端", description: "配置终端与命令执行行为。", Icon: SquareTerminalIcon };
-  }
-  if (normalized === "general" || normalized.includes("core") || normalized.includes("app")) {
-    return { label: "常规", description: "管理应用的通用行为与偏好。", Icon: Settings2Icon };
-  }
-  return { label: namespace, description: `编辑 ${namespace} 命名空间。`, Icon: FileCogIcon };
+function recordOf(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function valueAt(value: unknown, path: readonly string[]): unknown {
+  let current = value;
+  for (const key of path) current = recordOf(current)[key];
+  return current;
+}
+
+function stringField(namespace: SettingsNamespaceView | undefined, field: string, fallback: string): string {
+  const value = recordOf(namespace?.value)[field];
+  return typeof value === "string" ? value : fallback;
+}
+
+function applyTheme(preference: ThemePreference): void {
+  const dark = preference === "dark"
+    || (preference === "system" && (window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false));
+  document.documentElement.classList.toggle("dark", dark);
+  document.documentElement.style.colorScheme = dark ? "dark" : "light";
+}
+
+function isModelNamespace(namespace: SettingsNamespaceView): boolean {
+  return namespace.ns === "agent-default-model" || namespace.ns.startsWith("llm-");
+}
+
+function isGeneralNamespace(namespace: SettingsNamespaceView): boolean {
+  return ["agent-presets", "permission", "locale", "ui-theme", "ui-conversation"].includes(namespace.ns);
+}
+
+function PreferenceRow({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-19 flex-col items-stretch justify-between gap-3 border-b border-border py-4 last:border-b-0 sm:flex-row sm:items-center sm:gap-6">
+      <div className="min-w-0">
+        <div className="text-sm font-medium">{title}</div>
+        {description && <div className="mt-1 text-xs leading-5 text-muted-foreground">{description}</div>}
+      </div>
+      <div className="w-full shrink-0 sm:w-auto">{children}</div>
+    </div>
+  );
+}
+
+function ThemeControl({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: ThemePreference;
+  disabled: boolean;
+  onChange: (value: ThemePreference) => void;
+}) {
+  const choices = [
+    { id: "light" as const, label: "浅色", Icon: SunIcon },
+    { id: "dark" as const, label: "深色", Icon: MoonIcon },
+    { id: "system" as const, label: "跟随系统", Icon: MonitorIcon },
+  ];
+  return (
+    <div className="grid w-full grid-cols-3 gap-2" aria-label="外观">
+      {choices.map(({ id, label, Icon }) => (
+        <Button
+          key={id}
+          type="button"
+          variant="outline"
+          aria-pressed={value === id}
+          disabled={disabled}
+          className={cn(
+            "h-21 min-w-0 flex-col gap-2 rounded-xl px-2 font-normal",
+            value === id && "border-foreground/35 bg-muted",
+          )}
+          onClick={() => onChange(id)}
+        >
+          <Icon className="size-4" aria-hidden="true" />
+          {label}
+        </Button>
+      ))}
+    </div>
+  );
 }
 
 export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const descriptionId = useId();
-  const editorId = useId();
-  const [namespaces, setNamespaces] = useState<SettingsNamespace[]>([]);
-  const [selectedNamespace, setSelectedNamespace] = useState<string | null>(null);
+  const setBusyEnterBehavior = useDsh((state) => state.setBusyEnterBehavior);
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>("general");
+  const [namespaces, setNamespaces] = useState<SettingsNamespaceView[]>([]);
+  const [presets, setPresets] = useState<AgentPresetEntry[]>([]);
+  const [modelProviders, setModelProviders] = useState<ConfigurableProviderView[]>([]);
+  const [modelGroups, setModelGroups] = useState<ModelProviderGroup[]>([]);
+  const [credentials, setCredentials] = useState<Record<string, CredentialView>>({});
   const [writable, setWritable] = useState(false);
   const [hasDocument, setHasDocument] = useState(false);
-  const [text, setText] = useState("{}");
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [savingField, setSavingField] = useState<string | null>(null);
   const [openingDocument, setOpeningDocument] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
 
-  const activeNamespace = useMemo(
-    () => namespaces.find((item) => item.ns === selectedNamespace) ?? null,
-    [namespaces, selectedNamespace],
+  const namespace = useCallback((ns: string) => namespaces.find((item) => item.ns === ns), [namespaces]);
+  const modelNamespaces = useMemo(() => namespaces.filter(isModelNamespace), [namespaces]);
+  const pluginNamespaces = useMemo(
+    () => namespaces.filter((item) => !isGeneralNamespace(item) && !isModelNamespace(item)),
+    [namespaces],
   );
-  const activePresentation = activeNamespace
-    ? namespacePresentation(activeNamespace.ns)
-    : { label: "设置", description: "管理应用配置。", Icon: Settings2Icon };
+
+  const replaceNamespace = useCallback((view: SettingsNamespaceView) => {
+    setNamespaces((current) => current.map((item) => item.ns === view.ns ? view : item));
+  }, []);
 
   const loadSettings = useCallback(async () => {
     setLoading(true);
     setError(null);
-    setSaved(false);
     try {
-      const result = await rpc<SettingsDescription>("settings.describe");
-      if (!result.ok) {
-        setError(displayError(result));
-        return;
-      }
-      const nextNamespaces = result.value.namespaces ?? [];
-      const nextNamespace = nextNamespaces[0] ?? null;
+      const [settingsResult, presetsResult, providersResult, modelsResult] = await Promise.all([
+        rpc<SettingsDescribeResponse>("settings.describe"),
+        rpc<AgentPresetListResponse>("agentPreset.list"),
+        rpc<{ providers: ConfigurableProviderView[] }>("llm.providers"),
+        rpc<ModelCatalogResponse>("llm.models"),
+      ]);
+      if (!settingsResult.ok) throw new Error(displayError(settingsResult));
+      const nextNamespaces = settingsResult.value.namespaces ?? [];
       setNamespaces(nextNamespaces);
-      setWritable(result.value.writable);
-      setHasDocument(result.value.hasDocument);
-      setSelectedNamespace(nextNamespace?.ns ?? null);
-      setText(JSON.stringify(nextNamespace?.value ?? {}, null, 2));
+      setWritable(settingsResult.value.writable);
+      setHasDocument(settingsResult.value.hasDocument);
+      if (presetsResult.ok) setPresets([...presetsResult.value.presets]);
+      if (providersResult.ok) {
+        const providerRows = providersResult.value.providers;
+        setModelProviders(providerRows);
+        const refs = [...new Set(providerRows.flatMap((entry) => {
+          const view = nextNamespaces.find((item) => item.ns === entry.settingsNs);
+          const profile = recordOf(valueAt(view?.value, entry.settingsPath));
+          return typeof profile.apiKeyEnv === "string" ? [profile.apiKeyEnv] : [];
+        }))].slice(0, 64);
+        const credentialResult = refs.length > 0
+          ? await rpc<{ credentials: Record<string, CredentialView> }>("credentials.describe", { refs })
+          : { ok: true as const, value: { credentials: {} } };
+        if (credentialResult.ok) setCredentials(credentialResult.value.credentials);
+      }
+      if (modelsResult.ok) setModelGroups(modelsResult.value.groups);
+      const theme = stringField(nextNamespaces.find((item) => item.ns === "ui-theme"), "preference", "system");
+      if (theme === "light" || theme === "dark" || theme === "system") applyTheme(theme);
+      const busyEnter = stringField(nextNamespaces.find((item) => item.ns === "ui-conversation"), "busyEnter", "queue");
+      setBusyEnterBehavior(busyEnter === "steer" ? "steer" : "queue");
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [setBusyEnterBehavior]);
 
   useEffect(() => {
     if (open) void loadSettings();
   }, [loadSettings, open]);
 
-  const selectNamespace = (namespace: SettingsNamespace) => {
-    setSelectedNamespace(namespace.ns);
-    setText(JSON.stringify(namespace.value ?? {}, null, 2));
+  const mutateField = async (ns: string, path: string[], value: unknown, key: string) => {
+    const current = namespace(ns);
+    if (!current || !writable || savingField) return;
+    setSavingField(key);
     setError(null);
-    setSaved(false);
+    try {
+      const request: SettingsMutateRequest = {
+        ns,
+        ops: [{ op: "set", path, value }],
+        expectedRevision: current.revision,
+      };
+      const result = await rpc<SettingsNamespaceView>("settings.mutate", request);
+      if (!result.ok) throw new Error(displayError(result));
+      replaceNamespace(result.value);
+      if (ns === "ui-conversation" && path.length === 1 && path[0] === "busyEnter") {
+        setBusyEnterBehavior(value === "steer" ? "steer" : "queue");
+      }
+    } catch (cause) {
+      setError(errorMessage(cause));
+      await loadSettings();
+    } finally {
+      setSavingField(null);
+    }
   };
 
-  const saveSettings = async () => {
-    setSaving(true);
+  const updateDefaultPreset = async (id: string) => {
+    const current = namespace("agent-presets");
+    if (!current || !writable || savingField) return;
+    setSavingField("agent-presets");
     setError(null);
-    setSaved(false);
     try {
-      const value: unknown = JSON.parse(text);
-      if (value === null || typeof value !== "object" || Array.isArray(value)) {
-        throw new Error("设置内容必须是 JSON 对象。");
-      }
-      if (!selectedNamespace) throw new Error("请先选择一个设置分类。");
-      const namespace = namespaces.find((item) => item.ns === selectedNamespace);
-      const result = await rpc("settings.update", {
-        ns: selectedNamespace,
-        patch: value,
-        ...(namespace ? { expectedRevision: namespace.revision } : {}),
-      });
-      if (!result.ok) {
-        setError(displayError(result));
-        return;
-      }
-      setNamespaces((current) => current.map((item) => (
-        item.ns === selectedNamespace ? { ...item, value } : item
-      )));
-      setSaved(true);
+      const request: SettingsUpdateRequest = {
+        ns: current.ns,
+        patch: { default: id },
+        expectedRevision: current.revision,
+      };
+      const result = await rpc<SettingsNamespaceView>("settings.update", request);
+      if (!result.ok) throw new Error(displayError(result));
+      replaceNamespace(result.value);
+      setPresets((items) => items.map((item) => ({ ...item, isDefault: item.id === id })));
     } catch (cause) {
-      setError(cause instanceof SyntaxError ? "保存前请输入有效的 JSON。" : errorMessage(cause));
+      setError(errorMessage(cause));
+      await loadSettings();
     } finally {
-      setSaving(false);
+      setSavingField(null);
     }
+  };
+
+  const mutateNamespace = async (current: SettingsNamespaceView, ops: SettingsPathOpView[]) => {
+    const request: SettingsMutateRequest = {
+      ns: current.ns,
+      ops,
+      expectedRevision: current.revision,
+    };
+    const result = await rpc<SettingsNamespaceView>("settings.mutate", request);
+    if (!result.ok) {
+      await loadSettings();
+      throw new Error(displayError(result));
+    }
+    replaceNamespace(result.value);
+    return result.value;
+  };
+
+  const writeCredential = async (ref: string, value: string) => {
+    const result = await rpc("credentials.set", { ref, value });
+    if (!result.ok) throw new Error(displayError(result));
+  };
+
+  const discoverModels = async (request: LlmDiscoverModelsRequest) => {
+    const result = await rpc<LlmDiscoverModelsResponse>("llm.discoverModels", request);
+    if (!result.ok) throw new Error(displayError(result));
+    return result.value.models;
+  };
+
+  const removeProvider = async (entry: ConfigurableProviderView, credentialRef?: string) => {
+    if (credentialRef) {
+      const credentialResult = await rpc("credentials.unset", { ref: credentialRef });
+      if (!credentialResult.ok) throw new Error(displayError(credentialResult));
+    }
+    const result = await rpc<SettingsNamespaceView>("settings.mutate", {
+      ns: entry.settingsNs,
+      ops: [{ op: "unset", path: entry.settingsPath }],
+    });
+    if (!result.ok) throw new Error(displayError(result));
+    await loadSettings();
   };
 
   const openDocument = async () => {
@@ -191,138 +357,178 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     }
   };
 
+  const defaultPreset = stringField(namespace("agent-presets"), "default", presets.find((item) => item.isDefault)?.id ?? "");
+  const permission = stringField(namespace("permission"), "defaultPreset", "workspace-write");
+  const locale = stringField(namespace("locale"), "preference", "zh");
+  const theme = stringField(namespace("ui-theme"), "preference", "system") as ThemePreference;
+  const busyEnter = stringField(namespace("ui-conversation"), "busyEnter", "queue");
+  const presetOptions = presets.filter((item) => !item.broken).map((item) => ({
+    value: item.id,
+    label: item.name ?? item.id,
+  }));
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="h-[min(800px,calc(100dvh-2rem))] w-[min(800px,calc(100vw-2rem))] max-w-none gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-none"
+        className="h-[min(800px,calc(100dvh-3rem))] w-[min(800px,calc(100vw-3rem))] max-w-none gap-0 overflow-hidden rounded-3xl p-0 sm:max-w-none"
         aria-describedby={descriptionId}
       >
-        <div className="flex h-full min-h-0 flex-col sm:flex-row">
-          <div className="flex shrink-0 flex-col gap-3 border-b bg-muted/25 px-3 py-4 sm:w-[188px] sm:gap-[18px] sm:border-r sm:border-b-0 sm:pt-[22px]">
+        <DialogDescription id={descriptionId} className="sr-only">管理 DeepSeek Harness 设置</DialogDescription>
+        <div className="flex h-full min-h-0 min-w-0 flex-col sm:flex-row">
+          <nav className="flex w-full min-w-0 shrink-0 flex-col gap-[18px] border-b border-border px-3 pt-[22px] sm:w-[188px] sm:border-r sm:border-b-0" aria-label="设置分类">
             <DialogTitle className="px-3 text-base leading-6">设置</DialogTitle>
-            <ScrollArea className="min-h-0 sm:flex-1">
-              <div className="flex w-max gap-1 pb-1 sm:w-full sm:flex-col sm:pb-0" role="navigation" aria-label="设置分类">
-                {namespaces.map((namespace) => {
-                  const presentation = namespacePresentation(namespace.ns);
-                  const selected = selectedNamespace === namespace.ns;
-                  return (
-                    <Button
-                      key={namespace.ns}
-                      type="button"
-                      variant="ghost"
-                      aria-current={selected ? "page" : undefined}
-                      className={cn(
-                        "h-10 min-w-36 justify-start gap-2 rounded-xl px-3 font-normal sm:min-w-0 sm:w-full",
-                        selected && "bg-muted text-foreground hover:bg-muted",
-                      )}
-                      onClick={() => selectNamespace(namespace)}
-                    >
-                      <presentation.Icon className="size-4" aria-hidden="true" />
-                      {presentation.label}
-                    </Button>
-                  );
-                })}
-              </div>
-            </ScrollArea>
-          </div>
-
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <div className="flex h-[54px] shrink-0 items-center gap-2 px-4">
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">{activePresentation.label}</div>
-                <DialogDescription id={descriptionId} className="truncate text-xs">
-                  {activePresentation.description}
-                </DialogDescription>
-              </div>
-              {hasDocument && (
+            <div className="grid w-full min-w-0 grid-cols-2 gap-1 pb-3 sm:flex sm:flex-col sm:pb-0">
+              {SECTIONS.map(({ id, label, Icon }) => (
                 <Button
+                  key={id}
                   type="button"
                   variant="ghost"
-                  size="sm"
-                  onClick={openDocument}
-                  disabled={loading || saving || openingDocument}
+                  aria-current={activeSection === id ? "page" : undefined}
+                  className={cn(
+                    "h-10 min-w-0 justify-start gap-2 rounded-xl px-3 font-normal sm:w-full",
+                    activeSection === id && "bg-muted text-foreground hover:bg-muted",
+                  )}
+                  onClick={() => setActiveSection(id)}
                 >
-                  {openingDocument ? <LoaderCircleIcon className="animate-spin" aria-hidden="true" /> : <ExternalLinkIcon aria-hidden="true" />}
+                  <Icon className="size-4" aria-hidden="true" />
+                  {label}
+                </Button>
+              ))}
+            </div>
+          </nav>
+
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <header className="flex h-[54px] shrink-0 items-center justify-end gap-2 px-4">
+              {hasDocument && (
+                <Button type="button" variant="ghost" size="sm" onClick={openDocument} disabled={loading || openingDocument}>
+                  {openingDocument ? <LoaderCircleIcon className="animate-spin" /> : <ExternalLinkIcon />}
                   <span className="hidden md:inline">打开配置文件</span>
                 </Button>
               )}
               <DialogClose asChild>
-                <Button type="button" variant="ghost" size="icon-sm" aria-label="关闭设置">
+                <Button type="button" variant="ghost" size="icon-sm" aria-label="关闭">
                   <XIcon aria-hidden="true" />
                 </Button>
               </DialogClose>
-            </div>
+            </header>
 
             <ScrollArea className="min-h-0 flex-1">
-              <div className="flex min-h-full flex-col px-6 pb-6">
+              <div className="min-h-full px-6 pb-6">
                 {loading ? (
-                  <div className="flex min-h-48 flex-1 items-center justify-center text-muted-foreground" role="status">
-                    <LoaderCircleIcon className="mr-2 size-4 animate-spin" aria-hidden="true" />
+                  <div className="flex min-h-48 items-center justify-center text-muted-foreground" role="status">
+                    <LoaderCircleIcon className="mr-2 size-4 animate-spin" />
                     正在加载设置
                   </div>
-                ) : activeNamespace ? (
-                  <div className="flex min-h-full flex-1 flex-col gap-3">
-                    <div className="flex items-center justify-between gap-3 border-b pb-4">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium">{activeNamespace.ns}</div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          {activeNamespace.applies === "restart" ? "保存后重启生效" : "保存后立即生效"}
-                        </div>
-                      </div>
-                      <div className="rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
-                        revision {activeNamespace.revision}
-                      </div>
+                ) : activeSection === "general" ? (
+                  <div>
+                    <PreferenceRow title="Agent 预设" description="对此后新建的会话生效。运行中的会话保持它开始时的预设。">
+                      <Select
+                        aria-label="Agent 预设"
+                        value={defaultPreset}
+                        options={presetOptions}
+                        disabled={!writable || savingField !== null || presetOptions.length === 0}
+                        className="bg-muted px-3 py-2 text-foreground"
+                        onValueChange={(value) => void updateDefaultPreset(value)}
+                      />
+                    </PreferenceRow>
+                    <PreferenceRow title="权限" description="选择新会话的默认权限模式">
+                      <Select
+                        aria-label="权限"
+                        value={permission}
+                        options={PERMISSION_OPTIONS}
+                        disabled={!writable || savingField !== null || !namespace("permission")}
+                        className="bg-muted px-3 py-2 text-foreground"
+                        onValueChange={(value) => void mutateField("permission", ["defaultPreset"], value, "permission")}
+                      />
+                    </PreferenceRow>
+                    <PreferenceRow title="语言">
+                      <Select
+                        aria-label="语言"
+                        value={locale}
+                        options={LOCALE_OPTIONS}
+                        disabled={!writable || savingField !== null || !namespace("locale")}
+                        className="bg-muted px-3 py-2 text-foreground"
+                        onValueChange={(value) => void mutateField("locale", ["preference"], value, "locale")}
+                      />
+                    </PreferenceRow>
+                    <div className="border-b border-border py-5">
+                      <div className="mb-3 text-sm font-medium">外观</div>
+                      <ThemeControl
+                        value={theme === "light" || theme === "dark" || theme === "system" ? theme : "system"}
+                        disabled={!writable || savingField !== null || !namespace("ui-theme")}
+                        onChange={(value) => {
+                          applyTheme(value);
+                          void mutateField("ui-theme", ["preference"], value, "ui-theme");
+                        }}
+                      />
                     </div>
-
-                    <Label htmlFor={editorId}>配置 JSON</Label>
-                    <Textarea
-                      id={editorId}
-                      value={text}
-                      onChange={(event) => {
-                        setText(event.target.value);
-                        setSaved(false);
-                        setError(null);
-                      }}
-                      disabled={saving}
-                      aria-invalid={Boolean(error)}
-                      aria-describedby={error ? `${editorId}-error` : undefined}
-                      spellCheck={false}
-                      className="min-h-80 flex-1 resize-none font-mono text-sm leading-6"
-                    />
-                    <div className="text-xs text-muted-foreground">
-                      敏感值会以脱敏形式显示，未显式修改时将保持原值。
-                    </div>
-                    {error && (
-                      <div id={`${editorId}-error`} className="text-sm text-destructive" role="alert">
-                        {error}
-                      </div>
-                    )}
-                    {saved && (
-                      <div className="flex items-center gap-1 text-sm text-emerald-600" role="status">
-                        <CheckIcon className="size-4" aria-hidden="true" />
-                        设置已保存
-                      </div>
-                    )}
+                    <PreferenceRow title="繁忙时 Enter 键行为" description="仅在智能体运行时生效；Cmd/Ctrl+Enter 使用另一行为">
+                      <Select
+                        aria-label="繁忙时 Enter 键行为"
+                        value={busyEnter}
+                        options={ENTER_OPTIONS}
+                        disabled={!writable || savingField !== null || !namespace("ui-conversation")}
+                        className="bg-muted px-3 py-2 text-foreground"
+                        onValueChange={(value) => void mutateField("ui-conversation", ["busyEnter"], value, "ui-conversation")}
+                      />
+                    </PreferenceRow>
+                    {error && <div className="mt-4 text-sm text-destructive" role="alert">{error}</div>}
                   </div>
+                ) : activeSection === "models" ? (
+                  <ModelsSettingsForms
+                    namespaces={modelNamespaces}
+                    groups={modelGroups}
+                    providers={modelProviders}
+                    credentials={credentials}
+                    writable={writable}
+                    onMutate={mutateNamespace}
+                    onCredential={writeCredential}
+                    onDiscover={discoverModels}
+                    onRemoveProvider={removeProvider}
+                    onReload={loadSettings}
+                  />
+                ) : activeSection === "plugins" ? (
+                  <PluginSettingsForms
+                    namespaces={pluginNamespaces}
+                    writable={writable}
+                    onMutate={mutateNamespace}
+                  />
                 ) : (
-                  <div className="flex min-h-48 flex-1 items-center justify-center text-sm text-muted-foreground">
-                    当前没有可用的设置分类
+                  <div className="space-y-1">
+                    <div className="mb-4">
+                      <h2 className="text-sm font-medium">Agent 预设</h2>
+                      <p className="mt-1 text-xs text-muted-foreground">管理新会话可使用的预设，并选择默认预设。</p>
+                    </div>
+                    {presets.map((preset) => (
+                      <div key={preset.id} className="flex items-center justify-between gap-4 border-b border-border py-4">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 text-sm font-medium">
+                            <span className="truncate">{preset.name ?? preset.id}</span>
+                            <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground">
+                              {preset.trust === "system" ? "内置" : "用户"}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">{preset.description ?? preset.id}</div>
+                          {preset.broken && <div className="mt-1 text-xs text-destructive">{preset.broken}</div>}
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={preset.isDefault ? "secondary" : "outline"}
+                          disabled={!writable || Boolean(preset.broken) || savingField !== null}
+                          onClick={() => void updateDefaultPreset(preset.id)}
+                        >
+                          {preset.isDefault ? "默认" : "设为默认"}
+                        </Button>
+                      </div>
+                    ))}
+                    {presets.length === 0 && <div className="py-16 text-center text-sm text-muted-foreground">没有可用的 Agent 预设。</div>}
+                    {error && <div className="mt-4 text-sm text-destructive" role="alert">{error}</div>}
                   </div>
                 )}
               </div>
             </ScrollArea>
-
-            <div className="flex min-h-14 shrink-0 items-center justify-end border-t bg-muted/20 px-6 py-3">
-              <Button
-                type="button"
-                onClick={saveSettings}
-                disabled={!activeNamespace || !writable || loading || saving || openingDocument}
-              >
-                {saving ? <LoaderCircleIcon className="animate-spin" aria-hidden="true" /> : <SaveIcon aria-hidden="true" />}
-                {saving ? "正在保存" : "保存设置"}
-              </Button>
-            </div>
           </div>
         </div>
       </DialogContent>

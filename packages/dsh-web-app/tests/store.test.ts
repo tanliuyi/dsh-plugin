@@ -67,7 +67,7 @@ function installFetch(t: test.Context): void {
       }
       case 'session.history': {
         sessionHistoryCalls.push((payload as { sessionId: string }).sessionId)
-        result = { ok: true, value: { events: [] } }
+        result = { ok: true, value: historyResponse(payload as Record<string, unknown>) }
         break
       }
       case 'subagent.list':
@@ -91,6 +91,12 @@ function installFetch(t: test.Context): void {
         break
       case 'commands/list':
         result = { ok: true, value: [] }
+        break
+      case 'commands/execute':
+        result = {
+          ok: true,
+          value: { commandId: 'command-1', result: { kind: 'success', text: 'done' } },
+        }
         break
       case 'skill.list':
         result = { ok: true, value: { skills: [] } }
@@ -230,6 +236,82 @@ test('boot: a valid thread URL takes precedence over the persisted session id', 
   assert.equal(useDsh.getState().currentSessionId, 'url-1')
   assert.equal(sessionCreateCount, 0)
   assert.deepEqual(sessionHistoryCalls, ['url-1'])
+})
+
+test('openSession repulls a history tail that lags the subscribed command baseline', async (t) => {
+  installFetch(t)
+  resetStore(null)
+  useDsh.setState({ sessions: [session('session-1')] as never })
+  let historyCall = 0
+  const run = {
+    type: 'command/run',
+    seq: 0,
+    time: 100,
+    data: { commandId: 'raced', name: 'compact', source: { kind: 'user' } },
+  }
+  const done = {
+    type: 'command/done',
+    seq: 1,
+    time: 200,
+    data: { commandId: 'raced', kind: 'success', text: 'No compactable history yet.' },
+  }
+  historyResponse = () => ({
+    events: (historyCall++ === 0 ? [run] : [run, done]).map((event) => ({ event })),
+    hasMore: false,
+  })
+
+  useDsh.getState().handleSubscribed('session-1', 1, 1)
+  await useDsh.getState().openSession('session-1')
+
+  assert.equal(sessionHistoryCalls.length, 2)
+  assert.equal(useDsh.getState().lastEventSeqBySession['session-1'], 1)
+  assert.deepEqual(useDsh.getState().messages[0]?.parts, [{
+    type: 'command',
+    commandId: 'raced',
+    name: 'compact',
+    args: null,
+    outcome: { kind: 'success', text: 'No compactable history yet.' },
+  }])
+})
+
+test('the first zero-based live event is rendered after opening an empty history', async (t) => {
+  installFetch(t)
+  resetStore(null)
+  useDsh.setState({ sessions: [session('session-1')] as never })
+
+  await useDsh.getState().openSession('session-1')
+  useDsh.getState().handleMuxEvent('session-1', {
+    type: 'command/run',
+    seq: 0,
+    time: 100,
+    data: { commandId: 'zero', name: 'compact', source: { kind: 'user' } },
+  })
+  await new Promise<void>((resolve) => queueMicrotask(resolve))
+
+  assert.equal(useDsh.getState().lastEventSeqBySession['session-1'], 0)
+  assert.deepEqual(useDsh.getState().messages[0]?.parts, [{
+    type: 'command',
+    commandId: 'zero',
+    name: 'compact',
+    args: null,
+    outcome: null,
+  }])
+})
+
+test('command execution sends the complete rc.8 gateway descriptor', async (t) => {
+  installFetch(t)
+  resetStore('session-1')
+
+  await useDsh.getState().executeCommand('/compact', 'session-1')
+  await useDsh.getState().setPermissionPreset('workspace-write')
+
+  const payloads = calls
+    .filter((call) => call.method === 'commands/execute')
+    .map((call) => call.payload)
+  assert.deepEqual(payloads, [
+    { args: { agentId: 'session-1', line: '/compact', images: [] } },
+    { args: { agentId: 'session-1', line: '/permission workspace-write', images: [] } },
+  ])
 })
 
 test('openSession: subagent history avoids root-session loaders and retains its mode', async (t) => {

@@ -185,3 +185,48 @@ test('foldHistory sorts by seq and drops duplicate replay events', () => {
     outcome: { kind: 'success', text: 'done' },
   }])
 })
+
+test('assistant finalization preserves the partial row virtualization key', () => {
+  const partial = foldEvent([], event(1, 'assistant/chunk', {
+    turn: 7,
+    step: 2,
+    chunk: { type: 'text-delta', index: 0, text: 'streaming' },
+  }))
+  assert.equal(partial?.messages[0]?.id, 'partial-7-2')
+  assert.equal(partial?.messages[0]?.virtualKey, undefined)
+
+  const finalized = foldEvent(partial!.messages, event(2, 'assistant/message', {
+    turn: 7,
+    step: 2,
+    message: {
+      messageId: 'wire-final',
+      content: [{ type: 'text', text: 'streaming complete' }],
+    },
+  }))
+  assert.equal(finalized?.messages[0]?.id, 'wire-final')
+  assert.equal(finalized?.messages[0]?.virtualKey, 'partial-7-2')
+})
+
+test('turn/end settles rc8 chunk-only interrupted assistant output', () => {
+  const messages = foldHistory([
+    event(1, 'assistant/chunk', {
+      turn: 3,
+      step: 0,
+      chunk: { type: 'text-delta', index: 0, text: 'visible partial' },
+    }),
+    event(2, 'assistant/chunk', {
+      turn: 3,
+      step: 1,
+      chunk: { type: 'reasoning-delta', index: 0, text: '' },
+    }),
+    event(3, 'turn/end', {
+      turn: 3,
+      reason: { kind: 'aborted', reason: 'user' },
+    }),
+  ])
+
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0]?.id, 'settled-3-0')
+  assert.equal(messages[0]?.virtualKey, 'partial-3-0')
+  assert.deepEqual(messages[0]?.parts, [{ type: 'text', text: 'visible partial' }])
+})

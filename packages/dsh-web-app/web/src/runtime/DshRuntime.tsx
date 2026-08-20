@@ -291,7 +291,10 @@ export function DshRuntimeProvider({ children }: { children: React.ReactNode }) 
     }
 
     if (session?.origin === 'subagent') await sendSubagentPrompt(session, parts)
-    else await sendPrompt(sessionId, parts, useDsh.getState().isRunning ? 'steer' : 'queue')
+    else {
+      const state = useDsh.getState()
+      await sendPrompt(sessionId, parts, state.isRunning ? state.busyEnterBehavior : 'queue')
+    }
     markSessionActive(sessionId)
   }, [createSession, executeCommand, markSessionActive, navigateToThread])
 

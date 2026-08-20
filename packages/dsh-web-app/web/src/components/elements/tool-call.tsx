@@ -1,11 +1,7 @@
 "use client";
 
 import { Children, type ComponentProps, type ReactNode } from "react";
-import {
-  CheckIcon,
-  ChevronRightIcon,
-  XCircleIcon,
-} from "lucide-react";
+import { CheckIcon, XCircleIcon } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -80,6 +76,8 @@ export interface ToolCallProps {
   querySuffix?: ReactNode;
   request: string;
   result: string;
+  /** Optional rich body for the standard Result field. */
+  resultContent?: ReactNode;
   /** Optional custom content for tool-specific renderers such as TerminalBlock. */
   content?: ReactNode;
   running: boolean;
@@ -97,6 +95,7 @@ export function ToolCall({
   querySuffix,
   request,
   result,
+  resultContent,
   content,
   running,
   open,
@@ -112,7 +111,6 @@ export function ToolCall({
       className={cn("w-full", className)}
     >
       <CollapsibleTrigger className="group/trigger max-w-full text-foreground/55 hover:text-foreground/90 flex items-center gap-2 rounded-md py-1 text-[13.5px] transition-colors outline-none">
-        {/* <ChevronRightIcon className="size-3.5 shrink-0 opacity-60 transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-open/trigger:rotate-90 group-data-panel-open/trigger:rotate-90 motion-reduce:transition-none" /> */}
         <SwapLabel active={running ? 0 : 1} className="text-start flex-shrink-0">
           <ShimmerLabel
             active={running}
@@ -157,9 +155,9 @@ export function ToolCall({
             <div className="bg-foreground/[0.06] mx-3.5 h-px" />
             <div className="px-3.5 pt-2 pb-2.5">
               <p className={cn(mono, "text-foreground/35 mb-1")}>Result</p>
-              <p className="text-foreground/90 max-h-48 overflow-auto break-words whitespace-pre-wrap">
-                {result}
-              </p>
+              <div className="text-foreground/90 max-h-48 overflow-auto break-words whitespace-pre-wrap">
+                {resultContent ?? result}
+              </div>
             </div>
           </div>
         )}

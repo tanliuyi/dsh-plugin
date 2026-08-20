@@ -1,7 +1,9 @@
 # @dsh-plugins/dsh-web-app
 
 完全独立的 dsh Web UI。**不依赖 `@deepseek-ai/dsh-web-app`**：不加载其 bundle、
-前端产物、shell 内核（`dsh-client-web`）与任何 `dsh-client-ui-*` 插件。
+前端产物、shell 内核（`dsh-client-web`）或浏览器插件阵容。bundle 仅运行
+`ui-theme`、`locale`、`ui-conversation` 的 Host half，以注册 rc.8 通用设置 namespace；
+这些包的 browser bundle 不会扫描或下发。
 
 - Host 组合层（`cordis.patch.yml`）：自建 web 传输 —— `webserver` +
   `apiproxy` + `client-connection`（`/api` 路由与 WebSocket downlink）+ 自研
@@ -72,7 +74,7 @@ tests/            #   Playwright 端到端验证
 - [x] 上下文注入折叠、图片 hydration、工具错误卡片、审批/提问应答
 - [x] queue/jobs/projection、goal、model/reasoning、agent preset、subagent 基础能力
 - [x] `todo/write` 全表替换 projection（空数组隐藏计划条）、`turn/start` 清空且 `turn/end` 保留、composer 计划条和 `todo_write` 专用摘要行（支持并行任务）
-- [x] settings namespace JSON 编辑、远端 session 搜索、workspace 分组/平铺/排序
+- [x] rc.8 设置四区段壳层、通用偏好控件、schema 驱动插件表单、默认模型、Provider 新增/自定义/发现/删除工作流、远端 session 搜索、workspace 分组/平铺/排序
 - [x] tailwind v4 + shadcn 主题（深色/浅色，跟随系统）
 
-详细对齐矩阵见 [UPSTREAM-ALIGNMENT.md](./UPSTREAM-ALIGNMENT.md)。当前剩余缺口主要是 credentials/provider onboarding、agent preset authoring、skills/web search 业务协议、produced files、队列 edit、反馈和 session-log export；分页、虚拟化、滚动锚定及专用卡片属于可选 UI 层能力，不作为本包的功能对齐要求。
+详细对齐矩阵见 [UPSTREAM-ALIGNMENT.md](./UPSTREAM-ALIGNMENT.md)。当前剩余缺口主要是 DeepSeek 首次运行 onboarding 和完整 credentials 独立管理界面、agent preset copy/open/remove authoring、skills/web search 业务协议、produced files、队列 edit、反馈和 session-log export；分页、虚拟化、滚动锚定及专用卡片属于可选 UI 层能力，不作为本包的功能对齐要求。

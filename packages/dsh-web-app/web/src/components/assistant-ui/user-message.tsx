@@ -34,7 +34,7 @@ export function UserMessage({ steering }: { steering?: DshMessage }) {
       <MessagePrimitive.Root
         data-slot="aui_user-message-root"
         data-role="steering"
-        className="fade-in slide-in-from-bottom-1 animate-in w-full duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+        className="fade-in slide-in-from-bottom-1 animate-in w-full duration-150"
       >
         <UserMessageSurface
           text={text}
@@ -53,7 +53,7 @@ export function UserMessage({ steering }: { steering?: DshMessage }) {
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
       data-role="user"
-      className="fade-in slide-in-from-bottom-1 animate-in w-full duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      className="fade-in slide-in-from-bottom-1 animate-in w-full duration-150"
     >
       <UserMessageSurface
         text={text}

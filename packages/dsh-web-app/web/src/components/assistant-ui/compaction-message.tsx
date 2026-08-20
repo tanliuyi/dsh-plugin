@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ChevronRightIcon, SquareTerminalIcon } from "lucide-react";
 
 import { MarkdownStatic } from "@/components/assistant-ui/markdown-static";
+import { ToolCall } from "@/components/elements/tool-call";
 import {
   Collapsible,
   CollapsibleContent,
@@ -37,8 +38,49 @@ export function CompactionMessage({
   title?: string;
   fallbackSummary?: string | null;
 }) {
+  const commandSurface = title === "compact";
   const [open, setOpen] = useState(false);
   const expandable = compaction.summary !== null;
+  const summary = compactionSummary(compaction, fallbackSummary);
+
+  if (commandSurface) {
+    const result = compaction.summary === null
+      ? summary
+      : `${summary}\n\n${compaction.summary}`;
+    return (
+      <div
+        data-slot="aui_command"
+        data-command-name="compact"
+        data-state="complete"
+        className="my-4 w-full"
+      >
+        <ToolCall
+          label="已执行"
+          activeLabel="执行中"
+          query="compact"
+          request="/compact"
+          result={result}
+          resultContent={(
+            <>
+              <p>{summary}</p>
+              {compaction.summary !== null && (
+                <div className="border-border/60 mt-2 border-t pt-2">
+                  <MarkdownStatic
+                    text={compaction.summary}
+                    className="text-foreground/80 text-[13px] leading-relaxed"
+                  />
+                </div>
+              )}
+            </>
+          )}
+          running={false}
+          success
+          open={open}
+          onOpenChange={setOpen}
+        />
+      </div>
+    );
+  }
 
   return (
     <Collapsible
@@ -59,9 +101,9 @@ export function CompactionMessage({
         <span aria-hidden="true" className="text-foreground/25">·</span>
         <span
           className="text-muted-foreground min-w-0 truncate text-[13px]"
-          title={compactionSummary(compaction, fallbackSummary)}
+          title={summary}
         >
-          {compactionSummary(compaction, fallbackSummary)}
+          {summary}
         </span>
         {expandable && (
           <ChevronRightIcon
